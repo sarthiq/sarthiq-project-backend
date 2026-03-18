@@ -1,63 +1,54 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../../database");
 
-const Project = sequelize.define(
-  "Project",
+const DockerInfo = sequelize.define(
+  "DockerInfo",
   {
     id: {
       type: DataTypes.INTEGER,
       primaryKey: true,
       autoIncrement: true,
     },
-    title: {
+    memory: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    description: {
-      type: DataTypes.TEXT,
-      allowNull: false,
-    },
-    projectRepoUrl: {
+    cpu: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    projectLanguage: {
+    disk: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    frameWork: {
-      type: DataTypes.STRING,
+    pidsLimit: {
+      type: DataTypes.INTEGER,
       allowNull: false,
     },
-    branch: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    projectDirectory: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    buildCommand: {
-      type: DataTypes.STRING,
-      allowNull: true,
-    },
-    buildDirectory: {
-      type: DataTypes.STRING,
-      allowNull: true,
-    },
-    envVariables: {
+
+    ulimit: {
       type: DataTypes.JSON,
       allowNull: false,
     },
+    logOpt: {
+      type: DataTypes.JSON,
+      allowNull: false,
+    },
+
+    restartPolicy: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+
     UserId: {
       type: DataTypes.INTEGER,
       allowNull: false,
     },
   },
   {
-    tableName: "projects",
+    tableName: "dockerInfos",
     timestamps: true,
   },
 );
 
-module.exports = Project;
+module.exports = DockerInfo;
