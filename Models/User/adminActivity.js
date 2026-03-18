@@ -41,7 +41,7 @@ const AdminActivity = sequelize.define(
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW,
     },
-    UserId: {
+    AdminId: {
       type: DataTypes.INTEGER,
       allowNull: false,
     },

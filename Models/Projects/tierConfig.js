@@ -50,12 +50,12 @@ const TierConfig = sequelize.define(
       allowNull: false,
       defaultValue: "unless-stopped",
     },
-    
+
     // ---- Platform Quota Limits ----
     maxProjectsPerUser: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      defaultValue: 1, // Number of concurrent projects allowed
+      defaultValue: 3, // Number of concurrent projects allowed
     },
     maxEnvsPerProject: {
       type: DataTypes.INTEGER,
@@ -66,7 +66,7 @@ const TierConfig = sequelize.define(
   {
     tableName: "tierConfigs",
     timestamps: true,
-  }
+  },
 );
 
 module.exports = TierConfig;
