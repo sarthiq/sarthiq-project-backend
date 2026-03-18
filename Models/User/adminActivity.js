@@ -1,5 +1,5 @@
-  const { DataTypes } = require("sequelize");
-  const { sequelize } = require("../../importantInfo");
+const { DataTypes } = require("sequelize");
+const { sequelize } = require("../../importantInfo");
 
 const AdminActivity = sequelize.define(
   "AdminActivity",
@@ -9,7 +9,7 @@ const AdminActivity = sequelize.define(
       primaryKey: true,
       autoIncrement: true,
     },
-    info:{
+    info: {
       type: DataTypes.JSON,
       allowNull: true,
     },
@@ -41,11 +41,15 @@ const AdminActivity = sequelize.define(
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW,
     },
+    UserId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
   },
   {
     tableName: "adminActivities",
     timestamps: false,
-  }
+  },
 );
 
 module.exports = AdminActivity;

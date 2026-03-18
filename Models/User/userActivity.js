@@ -9,7 +9,7 @@ const UserActivity = sequelize.define(
       primaryKey: true,
       autoIncrement: true,
     },
-    info:{
+    info: {
       type: DataTypes.JSON,
       allowNull: true,
     },
@@ -37,6 +37,10 @@ const UserActivity = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    UserId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
     createdAt: {
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW,
@@ -45,7 +49,7 @@ const UserActivity = sequelize.define(
   {
     tableName: "userActivities",
     timestamps: false, // If you don't want Sequelize to handle createdAt/updatedAt automatically
-  }
+  },
 );
 
 module.exports = UserActivity;
