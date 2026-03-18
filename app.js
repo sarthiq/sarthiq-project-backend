@@ -43,11 +43,58 @@ app.use("/", infoRoutes);
 
 setupRoutes(app);
 
-setupModels();
+const { ApolloServer } = require("@apollo/server");
+const { expressMiddleware } = require("@apollo/server/express4");
+const typeDefs = require("./GraphQL/typeDefs");
+const resolvers = require("./GraphQL/resolvers");
+const jwt = require("jsonwebtoken");
+const { JWT_SECRET_KEY } = require("./importantInfo");
 
-db.sync()
-  .then(async () => {
-    app.listen(process.env.APP_PORT);
-    console.log(`Listening to the port : ${process.env.APP_PORT}`);
-  })
-  .catch((err) => console.log(err));
+async function bootstrap() {
+  setupModels();
+
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+  });
+
+  await server.start();
+
+  app.use(
+    "/graphql",
+    cors({ origin: "*" }),
+    bodyParser.json({ limit: "50mb" }),
+    expressMiddleware(server, {
+      context: async ({ req }) => {
+        let user = null;
+        let admin = null;
+        const token = req.headers.authorization;
+
+        if (token) {
+          try {
+            const payload = jwt.verify(token, JWT_SECRET_KEY);
+            if (payload.adminToken) {
+              admin = payload;
+            } else {
+              user = payload;
+            }
+          } catch (error) {
+            console.error("GraphQL Auth error: Invalid token", error.message);
+          }
+        }
+        return { req, user, admin };
+      },
+    })
+  );
+
+  db.sync()
+    .then(() => {
+      const port = process.env.APP_PORT || 3000;
+      app.listen(port);
+      console.log(`Listening to the port : ${port}`);
+      console.log(`GraphQL endpoint available at http://localhost:${port}/graphql`);
+    })
+    .catch((err) => console.log(err));
+}
+
+bootstrap();
