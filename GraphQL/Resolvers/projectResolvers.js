@@ -2,15 +2,28 @@ const Project = require("../../Models/Projects/projects");
 const DockerInfo = require("../../Models/Projects/dockerInfo");
 const TierConfig = require("../../Models/Projects/tierConfig");
 const { logUserActivity } = require("../../Utils/activityLoggers");
+const { Op } = require("sequelize");
 
 module.exports = {
   Query: {
-    getProjects: async (_, __, context) => {
+    getProjects: async (_, { search, limit = 10, offset = 0 }, context) => {
       if (!context.user && !context.admin) {
         throw new Error("Unauthorized");
       }
+
+      const whereClause = context.user ? { UserId: context.user.id } : {};
+      
+      if (search) {
+        whereClause[Op.or] = [
+          { title: { [Op.like]: `%${search}%` } },
+          { description: { [Op.like]: `%${search}%` } }
+        ];
+      }
+
       return await Project.findAll({
-        where: context.user ? { UserId: context.user.id } : {},
+        where: whereClause,
+        limit,
+        offset,
         include: [DockerInfo]
       });
     }

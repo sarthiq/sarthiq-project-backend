@@ -26,8 +26,8 @@ module.exports = `#graphql
   }
 
   type Query {
-    getUserActivities: [UserActivity]
-    getAdminActivities: [AdminActivity]
-    getAllUserActivities: [UserActivity]
+    getUserActivities(search: String, limit: Int, offset: Int): [UserActivity]
+    getAdminActivities(search: String, limit: Int, offset: Int): [AdminActivity]
+    getAllUserActivities(search: String, limit: Int, offset: Int): [UserActivity]
   }
 `;

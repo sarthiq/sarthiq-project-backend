@@ -50,7 +50,7 @@ module.exports = `#graphql
   }
 
   type Query {
-    getProjects: [Project]
+    getProjects(search: String, limit: Int, offset: Int): [Project]
   }
 
   type Mutation {

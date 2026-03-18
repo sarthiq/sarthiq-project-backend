@@ -1,10 +1,21 @@
 const TierConfig = require("../../Models/Projects/tierConfig");
 const { logAdminActivity } = require("../../Utils/activityLoggers");
+const { Op } = require("sequelize");
 
 module.exports = {
   Query: {
-    getTierConfigs: async (_, __, context) => {
-      return await TierConfig.findAll();
+    getTierConfigs: async (_, { search, limit = 10, offset = 0 }, context) => {
+      const whereClause = {};
+      
+      if (search) {
+        whereClause.tierName = { [Op.like]: `%${search}%` };
+      }
+
+      return await TierConfig.findAll({
+        where: whereClause,
+        limit,
+        offset
+      });
     }
   },
 

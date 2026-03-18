@@ -23,7 +23,7 @@ module.exports = `#graphql
   }
 
   type Query {
-    getTierConfigs: [TierConfig]
+    getTierConfigs(search: String, limit: Int, offset: Int): [TierConfig]
   }
 
   type Mutation {
