@@ -45,6 +45,16 @@ const Project = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    subdomain: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      unique: true, // E.g., 'user-app-xyz.sarthiq.com'
+    },
+    customDomain: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      unique: true, // E.g., 'www.my-awesome-app.com'
+    },
     envVariables: {
       type: DataTypes.JSON,
       allowNull: false,
