@@ -44,7 +44,7 @@ app.use("/", infoRoutes);
 setupRoutes(app);
 
 const { ApolloServer } = require("@apollo/server");
-const { expressMiddleware } = require("@apollo/server/express4");
+const { expressMiddleware } = require("@as-integrations/express4");
 const typeDefs = require("./GraphQL/TypeDefs/index"); // Updated to point to modular TypeDefs
 const resolvers = require("./GraphQL/Resolvers/index"); // Updated to point to modular Resolvers
 const jwt = require("jsonwebtoken");
