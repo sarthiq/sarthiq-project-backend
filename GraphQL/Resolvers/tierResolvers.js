@@ -20,6 +20,29 @@ module.exports = {
   },
 
   Mutation: {
+    adminCreateTierConfig: async (_, { input }, context) => {
+      if (!context.admin) throw new Error("Unauthorized: Admin token missing or invalid");
+
+      const adminId = context.admin.id;
+
+      try {
+        const existing = await TierConfig.findOne({ where: { tierName: input.tierName } });
+        if (existing) throw new Error(`Tier "${input.tierName}" already exists`);
+
+        const tier = await TierConfig.create(input);
+
+        await logAdminActivity(
+          adminId,
+          'CREATE_TIER_CONFIG',
+          `Admin created new tier: ${input.tierName}`
+        );
+
+        return tier;
+      } catch (error) {
+        throw new Error(error.message || "Failed to create tier config");
+      }
+    },
+
     adminUpdateTierConfig: async (_, { tierName, input }, context) => {
       if (!context.admin) throw new Error("Unauthorized: Admin token missing or invalid");
 
