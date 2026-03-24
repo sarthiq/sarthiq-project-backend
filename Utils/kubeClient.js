@@ -77,8 +77,8 @@ async function createDeployment({
       template: {
         metadata: { labels: { app: label } },
         spec: {
-          // optionally pin to specific node
-          ...(nodeName && {
+          // optionally pin to specific node, but ignore local dummy fallback nodes
+          ...(nodeName && nodeName !== "minikube-local" && nodeName !== "docker-desktop" && {
             nodeSelector: { "kubernetes.io/hostname": nodeName },
           }),
           containers: [

@@ -147,7 +147,11 @@ const deployWorker = new Worker(
 
       const containerPort = dockerInfo.internalPort || 3000;
       const cpuLimit = dockerInfo.cpu || "500m";
-      const memLimit = dockerInfo.memory || "512Mi";
+      let memLimit = dockerInfo.memory || "512Mi";
+      if (memLimit.match(/^\d+m$/)) {
+        // "512m" is milli-bytes in K8s (0.5 bytes!). Convert to "512Mi" (Mebibytes)
+        memLimit = memLimit.replace("m", "Mi");
+      }
 
       /* ---- STEP 5: Create K8s resources ----------------------------- */
       await appendLog(jobRecord, "Step 5/6: Creating Kubernetes resources...");
