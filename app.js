@@ -3,7 +3,10 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { activityLogger } = require("./Middleware/activityLogger");
-const { sleepProxyHandler, router: proxyRouter } = require("./Middleware/sleepProxy");
+const {
+  sleepProxyHandler,
+  router: proxyRouter,
+} = require("./Middleware/sleepProxy");
 
 const { setupRoutes } = require("./Routes/setupRoutes");
 const db = require("./database");
@@ -18,7 +21,7 @@ app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST"],
-  })
+  }),
 );
 
 app.use(bodyParser.json({ limit: "50mb" }));
@@ -72,16 +75,18 @@ async function performInitialHealthChecks() {
   }
 
   // 3. Env Config Check
-  if (!process.env.QDRANT_URL) errors.push("Missing QDRANT_URL in environment variables.");
-  if (!process.env.NEO4J_URI) errors.push("Missing NEO4J_URI in environment variables.");
   if (process.env.NODE_ENV === "production" && !process.env.DOCKER_REGISTRY) {
-    errors.push("Missing DOCKER_REGISTRY in environment! Kubernetes cannot pull images in production without this.");
+    errors.push(
+      "Missing DOCKER_REGISTRY in environment! Kubernetes cannot pull images in production without this.",
+    );
   }
 
   if (errors.length > 0) {
     console.error("\n❌ [bootstrap] CRITICAL STARTUP CHECKS FAILED:");
     errors.forEach((e) => console.error(`   - ${e}`));
-    console.error("Please ensure all services are running and .env is configured correctly.\n");
+    console.error(
+      "Please ensure all services are running and .env is configured correctly.\n",
+    );
     process.exit(1); // Fail fast before bringing up APIs
   }
   console.log("[bootstrap] ✅ All core systems validated running.");
@@ -94,11 +99,11 @@ async function bootstrap() {
   setupModels();
 
   // ── Start BullMQ workers ──────────────────────────────────────
-  require("./Jobs/deployWorker");   // deploy pipeline
-  require("./Jobs/wakeWorker");     // on-demand cold-start wake
+  require("./Jobs/deployWorker"); // deploy pipeline
+  require("./Jobs/wakeWorker"); // on-demand cold-start wake
   const { startSleepWatcherCron } = require("./Jobs/sleepWatcher");
   startSleepWatcherCron().catch((e) =>
-    console.error("[sleepWatcher] Cron start error:", e.message)
+    console.error("[sleepWatcher] Cron start error:", e.message),
   );
   console.log("[bootstrap] BullMQ workers started");
 
@@ -133,7 +138,7 @@ async function bootstrap() {
         }
         return { req, user, admin };
       },
-    })
+    }),
   );
 
   // ── Mount sleep proxy wake-status REST route ────────────────
@@ -147,7 +152,9 @@ async function bootstrap() {
       const port = process.env.APP_PORT || 3000;
       app.listen(port);
       console.log(`Listening to the port : ${port}`);
-      console.log(`GraphQL endpoint available at http://localhost:${port}/graphql`);
+      console.log(
+        `GraphQL endpoint available at http://localhost:${port}/graphql`,
+      );
     })
     .catch((err) => console.log(err));
 }
