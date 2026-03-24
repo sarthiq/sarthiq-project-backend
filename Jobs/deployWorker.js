@@ -31,10 +31,11 @@ const {
   createIngress,
   waitForReady,
 } = require("../Utils/kubeClient");
-const { getBestNode, reserveNode } = require("../Utils/nodeManager");
+const { getBestNode, reserveNode, releaseNode } = require("../Utils/nodeManager");
 
-const REGISTRY = process.env.DOCKER_REGISTRY || "registry.sarthiq.com";
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "sarthiq.com";
+const isProd = process.env.NODE_ENV === "production";
+const REGISTRY = process.env.DOCKER_REGISTRY || (isProd ? "registry.sarthiq.com" : "");
+const BASE_DOMAIN = process.env.BASE_DOMAIN || (isProd ? "sarthiq.com" : "localhost");
 
 /* ------------------------------------------------------------------ */
 /* Helper: append a log line to the DeploymentJob record               */
@@ -85,6 +86,8 @@ const deployWorker = new Worker(
       await jobRecord.save();
     };
 
+    let reservedNodeId = null;
+
     try {
       /* ---- Mark as building ---------------------------------------- */
       await updateStatus("building");
@@ -96,6 +99,7 @@ const deployWorker = new Worker(
       const node = await getBestNode();
       await appendLog(jobRecord, `  → Assigned to node: ${node.nodeName}`);
       await reserveNode(node.id);
+      reservedNodeId = node.id;
 
       /* ---- STEP 2: Generate subdomain if not set -------------------- */
       if (!project.subdomain) {
@@ -114,16 +118,20 @@ const deployWorker = new Worker(
 
       /* ---- Build image --------------------------------------------- */
       await appendLog(jobRecord, "Step 3/6: Building Docker image...");
-      const imageTag = `${REGISTRY}/${project.subdomain}:${Date.now()}`;
+      const imageTag = REGISTRY ? `${REGISTRY}/${project.subdomain}:${Date.now()}` : `${project.subdomain}:${Date.now()}`;
       const buildContext = path.join(tmpDir, project.projectDirectory || ".");
       const buildCmd = `docker build -t ${imageTag} ${buildContext}`;
       await execAsync(buildCmd, { timeout: 600_000 }); // 10 min max
       await appendLog(jobRecord, `  → Image built: ${imageTag}`);
 
       /* ---- Push image ---------------------------------------------- */
-      await appendLog(jobRecord, "Step 4/6: Pushing image to registry...");
-      await execAsync(`docker push ${imageTag}`, { timeout: 300_000 });
-      await appendLog(jobRecord, "  → Push complete.");
+      if (REGISTRY) {
+        await appendLog(jobRecord, "Step 4/6: Pushing image to registry...");
+        await execAsync(`docker push ${imageTag}`, { timeout: 300_000 });
+        await appendLog(jobRecord, "  → Push complete.");
+      } else {
+        await appendLog(jobRecord, "Step 4/6: Local testing mode. Skipping registry push.");
+      }
 
       /* Clean up temp dir */
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -194,7 +202,13 @@ const deployWorker = new Worker(
 
       return { success: true, url: `https://${publicHost}` };
     } catch (err) {
+      console.error("[deployWorker] FATAL:", err.stack);
       await appendLog(jobRecord, `❌ Error: ${err.message}`);
+      await appendLog(jobRecord, `Stack: ${err.stack}`);
+
+      if (reservedNodeId) {
+        await releaseNode(reservedNodeId).catch(console.error);
+      }
 
       dockerInfo.status = "failed";
       await dockerInfo.save();

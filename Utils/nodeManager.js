@@ -48,8 +48,15 @@ async function getBestNode(
   // Fallback for local testing (e.g. Minikube without metrics-server)
   if (!nodes.length) {
     console.log("[nodeManager] No active nodes found from metrics-server. Auto-registering 'minikube-local' fallback.");
-    await registerNode("minikube-local", 4000, 8192); // 4 CPU, 8GB RAM limit
+    await registerNode("minikube-local", 400000, 819200); // Massive dummy limit
     nodes = await KubeNode.findAll({ where: { isActive: true } });
+  } else {
+    // If the local node exists from a previous run, automatically upgrade its limits 
+    // and wipe any leaked resources to prevent capacity locks during local dev testing!
+    const localNode = nodes.find(n => n.nodeName === "minikube-local");
+    if (localNode) {
+      await localNode.update({ totalCpuMillicores: 400000, totalMemoryMi: 819200, usedCpuMillicores: 0, usedMemoryMi: 0 });
+    }
   }
 
   if (!nodes.length) throw new Error("No active Kubernetes nodes registered.");

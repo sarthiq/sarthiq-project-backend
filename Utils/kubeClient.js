@@ -9,14 +9,24 @@ const k8s = require("@kubernetes/client-node");
 
 const kc = new k8s.KubeConfig();
 
-if (process.env.KUBECONFIG) {
-  kc.loadFromFile(process.env.KUBECONFIG);
+// loadFromDefault() handles all environments in priority order:
+// 1. KUBECONFIG env var  2. ~/.kube/config  3. WSL kubeconfig  4. In-cluster service account
+kc.loadFromDefault();
+
+// Fail fast if the loaded config has no usable cluster server URL
+const _cluster = kc.getCurrentCluster();
+if (
+  !_cluster ||
+  !_cluster.server ||
+  _cluster.server.includes("undefined")
+) {
+  console.error(
+    "[kubeClient] ⚠ No valid Kubernetes cluster URL found. Server:",
+    _cluster?.server,
+    "— Ensure ~/.kube/config or KUBECONFIG env var is set correctly."
+  );
 } else {
-  try {
-    kc.loadFromCluster();
-  } catch {
-    kc.loadFromDefault(); // dev fallback
-  }
+  console.log(`[kubeClient] ✓ Connected to cluster: ${_cluster.name} (${_cluster.server})`);
 }
 
 const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
