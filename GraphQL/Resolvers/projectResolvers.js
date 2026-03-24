@@ -88,6 +88,46 @@ module.exports = {
         console.error(error);
         throw new Error(error.message || "Failed to create project");
       }
+    },
+
+    userUpdateProject: async (_, { projectId, input }, context) => {
+      if (!context.user) throw new Error("Unauthorized: User token missing or invalid");
+
+      const project = await Project.findByPk(projectId);
+      if (!project) throw new Error("Project not found");
+      if (project.UserId !== context.user.id) throw new Error("Unauthorized: Not your project");
+
+      try {
+        const updateData = {};
+        if (input.title !== undefined) updateData.title = input.title;
+        if (input.description !== undefined) updateData.description = input.description;
+        if (input.projectRepoUrl !== undefined) updateData.projectRepoUrl = input.projectRepoUrl;
+        if (input.projectLanguage !== undefined) updateData.projectLanguage = input.projectLanguage;
+        if (input.frameWork !== undefined) updateData.frameWork = input.frameWork;
+        if (input.branch !== undefined) updateData.branch = input.branch;
+        if (input.projectDirectory !== undefined) updateData.projectDirectory = input.projectDirectory;
+        if (input.buildCommand !== undefined) updateData.buildCommand = input.buildCommand;
+        if (input.buildDirectory !== undefined) updateData.buildDirectory = input.buildDirectory;
+        if (input.envVariables !== undefined) {
+          updateData.envVariables = JSON.parse(input.envVariables || "{}");
+        }
+
+        await project.update(updateData);
+
+        await logUserActivity(
+          context.user.id, 
+          'UPDATE_PROJECT', 
+          `Project updated: ${project.title}`
+        );
+
+        return await Project.findByPk(projectId, {
+          include: [DockerInfo]
+        });
+
+      } catch (error) {
+        console.error(error);
+        throw new Error(error.message || "Failed to update project");
+      }
     }
   }
 };

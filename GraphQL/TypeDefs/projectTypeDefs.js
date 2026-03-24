@@ -53,11 +53,25 @@ module.exports = `#graphql
     envVariables: String! 
   }
 
+  input UpdateProjectInput {
+    title: String
+    description: String
+    projectRepoUrl: String
+    projectLanguage: String
+    frameWork: String
+    branch: String
+    projectDirectory: String
+    buildCommand: String
+    buildDirectory: String
+    envVariables: String
+  }
+
   type Query {
     getProjects(search: String, limit: Int, offset: Int): [Project]
   }
 
   type Mutation {
     userCreateProject(input: ProjectInput!): Project
+    userUpdateProject(projectId: ID!, input: UpdateProjectInput!): Project
   }
 `;
