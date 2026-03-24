@@ -34,6 +34,10 @@ module.exports = `#graphql
     internalPort: Int
     containerId: String
     containerUser: String
+    status: String
+    nodeId: String
+    deployedAt: String
+    lastActivityAt: String
   }
 
   input ProjectInput {

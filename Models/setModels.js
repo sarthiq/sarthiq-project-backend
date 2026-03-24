@@ -13,4 +13,6 @@ exports.setupModels = async () => {
   // Project ↔ DeploymentJob (1:N)
   Project.hasMany(DeploymentJob, { foreignKey: "ProjectId" });
   DeploymentJob.belongsTo(Project, { foreignKey: "ProjectId" });
+
+  await DockerInfo.sync({ alter: true });
 };
