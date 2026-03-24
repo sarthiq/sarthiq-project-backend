@@ -116,8 +116,23 @@ async function createDeployment({
     },
   };
 
+  // ✅ Auto-create Namespace if it does not exist on a fresh production server
+  try {
+    await coreV1.readNamespace(NAMESPACE).catch(() => coreV1.readNamespace({ name: NAMESPACE }));
+  } catch (err) {
+    if (err.statusCode === 404 || err?.response?.statusCode === 404 || err.message.includes("404")) {
+      console.log(`[kubeClient] Namespace '${NAMESPACE}' not found. Creating it now...`);
+      await coreV1.createNamespace({
+        body: { apiVersion: "v1", kind: "Namespace", metadata: { name: NAMESPACE } } // Support for older clients
+      }).catch((e) => coreV1.createNamespace({
+        apiVersion: "v1", kind: "Namespace", metadata: { name: NAMESPACE } // Support for newer clients
+      })).catch(console.error);
+    }
+  }
+
   const existing = await appsV1
     .readNamespacedDeployment({ name: label, namespace: NAMESPACE })
+    .catch(() => appsV1.readNamespacedDeployment(label, NAMESPACE))
     .catch(() => null);
 
   if (existing) {
