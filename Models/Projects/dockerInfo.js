@@ -75,6 +75,25 @@ const DockerInfo = sequelize.define(
       allowNull: true,
     },
 
+    // ── Deployment lifecycle fields ──────────────────────────────
+    status: {
+      type: DataTypes.ENUM("idle", "queued", "building", "running", "sleeping", "failed"),
+      defaultValue: "idle",
+      allowNull: false,
+    },
+    nodeId: {
+      type: DataTypes.STRING,
+      allowNull: true, // name of the K8s node hosting this container
+    },
+    deployedAt: {
+      type: DataTypes.DATE,
+      allowNull: true, // timestamp of last successful deploy
+    },
+    lastActivityAt: {
+      type: DataTypes.DATE,
+      allowNull: true, // updated on every proxied request; used by sleepWatcher
+    },
+
     UserId: {
       type: DataTypes.INTEGER,
       allowNull: false,
