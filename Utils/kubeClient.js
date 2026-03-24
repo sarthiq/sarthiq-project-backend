@@ -91,16 +91,16 @@ async function createDeployment({
                 limits: { cpu: cpuLimit, memory: memoryLimit },
                 requests: { cpu: cpuRequest, memory: memoryRequest },
               },
-              // Liveness probe
+              // Liveness probe (use tcpSocket as the generic default for user apps)
               livenessProbe: {
-                httpGet: { path: "/", port: containerPort },
+                tcpSocket: { port: containerPort },
                 initialDelaySeconds: 30,
                 periodSeconds: 15,
                 failureThreshold: 3,
               },
               // Readiness probe
               readinessProbe: {
-                httpGet: { path: "/", port: containerPort },
+                tcpSocket: { port: containerPort },
                 initialDelaySeconds: 10,
                 periodSeconds: 5,
                 failureThreshold: 3,
