@@ -175,6 +175,7 @@ async function createService({ name, containerPort }) {
 async function createIngress({ name, subdomain, baseDomain }) {
   const label = safeLabel(name);
   const host = `${subdomain}.${baseDomain}`;
+  const isProd = process.env.NODE_ENV === "production";
 
   const ingress = {
     apiVersion: "networking.k8s.io/v1",
@@ -191,10 +192,20 @@ async function createIngress({ name, subdomain, baseDomain }) {
         "nginx.ingress.kubernetes.io/proxy-http-version": "1.1",
         "nginx.ingress.kubernetes.io/proxy-set-headers":
           "Upgrade $http_upgrade,Connection upgrade",
+        // Automatic HTTPS assignment via cert-manager in production
+        ...(isProd && { "cert-manager.io/cluster-issuer": "letsencrypt-prod" }),
       },
     },
     spec: {
       ingressClassName: "nginx",
+      ...(isProd && {
+        tls: [
+          {
+            hosts: [host],
+            secretName: `${label}-tls`,
+          },
+        ],
+      }),
       rules: [
         {
           host,

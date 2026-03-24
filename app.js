@@ -49,7 +49,48 @@ const resolvers = require("./GraphQL/Resolvers/index"); // Updated to point to m
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET_KEY } = require("./importantInfo");
 
+async function performInitialHealthChecks() {
+  console.log("------------------------------------------------------");
+  console.log("[bootstrap] 🔍 Running initial system health checks...");
+  const errors = [];
+
+  // 1. MySQL Check
+  try {
+    await db.authenticate();
+    console.log("  ✓ Database (MySQL) reachable");
+  } catch (err) {
+    errors.push(`MySQL Connection Failed: ${err.message}`);
+  }
+
+  // 2. Redis Check
+  try {
+    const { connection } = require("./Jobs/queues");
+    await connection.ping();
+    console.log("  ✓ Redis reachable");
+  } catch (err) {
+    errors.push(`Redis Connection Failed: ${err.message}`);
+  }
+
+  // 3. Env Config Check
+  if (!process.env.QDRANT_URL) errors.push("Missing QDRANT_URL in environment variables.");
+  if (!process.env.NEO4J_URI) errors.push("Missing NEO4J_URI in environment variables.");
+  if (process.env.NODE_ENV === "production" && !process.env.DOCKER_REGISTRY) {
+    errors.push("Missing DOCKER_REGISTRY in environment! Kubernetes cannot pull images in production without this.");
+  }
+
+  if (errors.length > 0) {
+    console.error("\n❌ [bootstrap] CRITICAL STARTUP CHECKS FAILED:");
+    errors.forEach((e) => console.error(`   - ${e}`));
+    console.error("Please ensure all services are running and .env is configured correctly.\n");
+    process.exit(1); // Fail fast before bringing up APIs
+  }
+  console.log("[bootstrap] ✅ All core systems validated running.");
+  console.log("------------------------------------------------------\n");
+}
+
 async function bootstrap() {
+  await performInitialHealthChecks();
+
   setupModels();
 
   // ── Start BullMQ workers ──────────────────────────────────────
