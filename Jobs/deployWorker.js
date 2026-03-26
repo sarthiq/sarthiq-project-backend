@@ -120,6 +120,51 @@ const deployWorker = new Worker(
       await appendLog(jobRecord, "Step 3/6: Building Docker image...");
       const imageTag = REGISTRY ? `${REGISTRY}/${project.subdomain}:${Date.now()}` : `${project.subdomain}:${Date.now()}`;
       const buildContext = path.join(tmpDir, project.projectDirectory || ".");
+
+      const dockerfilePath = path.join(buildContext, "Dockerfile");
+      if (!fs.existsSync(dockerfilePath)) {
+        await appendLog(jobRecord, "  → No Dockerfile found. Generating dynamic Dockerfile...");
+        let dockerfileContent = "";
+        const isStatic = ["React", "Vue", "Angular"].includes(project.frameWork);
+        const bCmd = project.buildCommand || "npm run build";
+        const bDir = project.buildDirectory || (project.frameWork === "React" ? "build" : "dist");
+
+        if (isStatic) {
+          dockerfileContent = `
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN ${bCmd}
+
+FROM nginx:alpine
+COPY --from=builder /app/${bDir} /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+`.trim();
+          dockerInfo.internalPort = 80;
+          await dockerInfo.save();
+        } else {
+          const startCmd = "npm start";
+          const buildStep = project.buildCommand ? `RUN npm run build` : ""; // using project.buildCommand might be tricky, simple fallback logic
+          const actualBuildStep = project.buildCommand ? `RUN ${project.buildCommand}` : "";
+          const port = dockerInfo.internalPort || 3000;
+          dockerfileContent = `
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+${actualBuildStep}
+EXPOSE ${port}
+CMD ["sh", "-c", "${startCmd}"]
+`.trim();
+        }
+        fs.writeFileSync(dockerfilePath, dockerfileContent);
+        await appendLog(jobRecord, `  → Generated Dockerfile for ${project.frameWork || "Node.js"} project.`);
+      }
+
       const buildCmd = `docker build -t ${imageTag} ${buildContext}`;
       await execAsync(buildCmd, { timeout: 600_000 }); // 10 min max
       await appendLog(jobRecord, `  → Image built: ${imageTag}`);
