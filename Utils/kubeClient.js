@@ -177,7 +177,9 @@ async function createService({ name, containerPort }) {
     .readNamespacedService({ name: label, namespace: NAMESPACE })
     .catch(() => null);
 
-  if (!existing) {
+  if (existing) {
+    await coreV1.replaceNamespacedService({ name: label, namespace: NAMESPACE, body: svc });
+  } else {
     await coreV1.createNamespacedService({ namespace: NAMESPACE, body: svc });
   }
 
@@ -200,13 +202,11 @@ async function createIngress({ name, subdomain, baseDomain }) {
       namespace: NAMESPACE,
       labels: { "managed-by": "sarthiq" },
       annotations: {
-        "nginx.ingress.kubernetes.io/rewrite-target": "/",
         "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
         "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
-        // Enable WebSocket support
+        // Enable WebSocket support via standard annotations
         "nginx.ingress.kubernetes.io/proxy-http-version": "1.1",
-        "nginx.ingress.kubernetes.io/proxy-set-headers":
-          "Upgrade $http_upgrade,Connection upgrade",
+        "nginx.ingress.kubernetes.io/use-regex": "false",
         // Automatic HTTPS assignment via cert-manager in production
         ...(isProd && { "cert-manager.io/cluster-issuer": "letsencrypt-prod" }),
       },

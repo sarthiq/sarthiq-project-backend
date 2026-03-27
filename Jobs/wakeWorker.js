@@ -15,6 +15,7 @@
  */
 const { Worker } = require("bullmq");
 const { connection } = require("./queues");
+const { deployQueue } = require("./queues");
 const DockerInfo = require("../Models/Projects/dockerInfo");
 const Project = require("../Models/Projects/projects");
 const DeploymentJob = require("../Models/Deployment/deploymentJob");
@@ -90,7 +91,48 @@ const wakeWorker = new Worker(
 
       /* ---- Scale K8s deployment to 1 ------------------------------- */
       logLine(`Scaling ${project.subdomain} from 0 → 1 replica...`);
-      await scaleDeployment(project.subdomain, 1);
+      try {
+        await scaleDeployment(project.subdomain, 1);
+      } catch (scaleErr) {
+        // If deployment doesn't exist in K8s (404), fall back to full redeploy
+        const is404 = scaleErr.statusCode === 404 ||
+          scaleErr?.response?.statusCode === 404 ||
+          (scaleErr.message && scaleErr.message.includes("not found"));
+
+        if (is404) {
+          logLine(`⚠ K8s Deployment not found. Falling back to full redeploy...`);
+
+          // Reset status so deploy worker can pick it up
+          dockerInfo.status = "queued";
+          await dockerInfo.save();
+
+          if (jobRecord) {
+            jobRecord.status = "queued";
+            jobRecord.logs = (jobRecord.logs || "") + "[WAKE] No K8s deployment found. Re-deploying from scratch...\n";
+            await jobRecord.save();
+          }
+
+          // Enqueue a full deploy
+          const userId = jobRecord?.UserId || null;
+          const newDbJob = await require("../Models/Deployment/deploymentJob").create({
+            ProjectId: parseInt(project.id),
+            UserId: userId,
+            status: "queued",
+            logs: "[DEPLOY] Auto-triggered by wake fallback\n",
+          });
+
+          await deployQueue.add("deploy", {
+            projectId: parseInt(project.id),
+            deploymentJobId: newDbJob.id,
+            userId,
+          }, { jobId: `deploy-${project.id}-${newDbJob.id}` });
+
+          logLine(`✅ Redeploy job enqueued (job #${newDbJob.id}).`);
+          return { redeployed: true, subdomain: project.subdomain };
+        }
+
+        throw scaleErr; // rethrow non-404 errors
+      }
 
       /* ---- Wait for pod ready -------------------------------------- */
       logLine("Waiting for pod to become ready...");

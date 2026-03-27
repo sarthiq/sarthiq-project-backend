@@ -73,5 +73,6 @@ module.exports = `#graphql
   type Mutation {
     userCreateProject(input: ProjectInput!): Project
     userUpdateProject(projectId: ID!, input: UpdateProjectInput!): Project
+    userDeleteProject(projectId: ID!): Boolean
   }
 `;

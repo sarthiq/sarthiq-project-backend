@@ -1,6 +1,8 @@
 const Project = require("../../Models/Projects/projects");
 const DockerInfo = require("../../Models/Projects/dockerInfo");
 const TierConfig = require("../../Models/Projects/tierConfig");
+const DeploymentJob = require("../../Models/Deployment/deploymentJob");
+const { deleteProjectResources } = require("../../Utils/kubeClient");
 const { logUserActivity } = require("../../Utils/activityLoggers");
 const { Op } = require("sequelize");
 
@@ -127,6 +129,40 @@ module.exports = {
       } catch (error) {
         console.error(error);
         throw new Error(error.message || "Failed to update project");
+      }
+    },
+
+    userDeleteProject: async (_, { projectId }, context) => {
+      if (!context.user) throw new Error("Unauthorized: User token missing or invalid");
+
+      const project = await Project.findByPk(projectId);
+      if (!project) throw new Error("Project not found");
+      if (project.UserId !== context.user.id) throw new Error("Unauthorized: Not your project");
+
+      try {
+        // 1. Delete K8s resources if deployed
+        if (project.subdomain) {
+          await deleteProjectResources(project.subdomain).catch((err) => {
+            console.warn(`[deleteProject] K8s cleanup skipped: ${err.message}`);
+          });
+        }
+
+        // 2. Delete related DB records (order matters for FK constraints)
+        await DeploymentJob.destroy({ where: { ProjectId: projectId } });
+        await DockerInfo.destroy({ where: { ProjectId: projectId } });
+        await project.destroy();
+
+        // 3. Log activity
+        await logUserActivity(
+          context.user.id,
+          'DELETE_PROJECT',
+          `Project deleted: ${project.title}`
+        );
+
+        return true;
+      } catch (error) {
+        console.error(error);
+        throw new Error(error.message || "Failed to delete project");
       }
     }
   }
