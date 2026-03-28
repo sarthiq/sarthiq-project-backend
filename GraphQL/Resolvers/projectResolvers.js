@@ -7,6 +7,16 @@ const { logUserActivity } = require("../../Utils/activityLoggers");
 const { Op } = require("sequelize");
 
 module.exports = {
+  Project: {
+    envVariables: (parent) => {
+      // Ensure we return a string since the GraphQL schema expects a String
+      if (typeof parent.envVariables === "object" && parent.envVariables !== null) {
+        return JSON.stringify(parent.envVariables);
+      }
+      return parent.envVariables || "{}";
+    }
+  },
+
   Query: {
     getProjects: async (_, { search, limit = 10, offset = 0 }, context) => {
       if (!context.user && !context.admin) {
