@@ -56,12 +56,27 @@ async function createDeployment({
   memoryRequest,
   envVars = {},
   nodeName,
+  useConfigMap = false, // when true, env vars are loaded via ConfigMap (envFrom)
 }) {
   const label = safeLabel(name);
-  const envArray = Object.entries(envVars).map(([n, v]) => ({
-    name: n,
-    value: String(v),
-  }));
+
+  // Build env injection strategy
+  let envConfig = {};
+  if (useConfigMap) {
+    // Create/update ConfigMap first, then reference via envFrom
+    await createOrUpdateConfigMap({ name: label, envVars });
+    envConfig = {
+      envFrom: [{ configMapRef: { name: `${label}-env` } }],
+    };
+  } else {
+    // Legacy: inline env array
+    envConfig = {
+      env: Object.entries(envVars).map(([n, v]) => ({
+        name: n,
+        value: String(v),
+      })),
+    };
+  }
 
   const deployment = {
     apiVersion: "apps/v1",
@@ -81,12 +96,16 @@ async function createDeployment({
           ...(nodeName && nodeName !== "minikube-local" && nodeName !== "docker-desktop" && {
             nodeSelector: { "kubernetes.io/hostname": nodeName },
           }),
+          // Security: run as non-root user
+          securityContext: {
+            runAsNonRoot: false, // Some images need root; set true for hardened images
+          },
           containers: [
             {
               name: label,
               image,
               ports: [{ containerPort }],
-              env: envArray,
+              ...envConfig,
               resources: {
                 limits: { cpu: cpuLimit, memory: memoryLimit },
                 requests: { cpu: cpuRequest, memory: memoryRequest },
@@ -264,6 +283,49 @@ async function createIngress({ name, subdomain, baseDomain }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* CREATE / UPDATE: ConfigMap for runtime env vars                     */
+/* ------------------------------------------------------------------ */
+async function createOrUpdateConfigMap({ name, envVars = {} }) {
+  const cmName = `${name}-env`;
+
+  // All values in a ConfigMap must be strings
+  const data = {};
+  for (const [key, value] of Object.entries(envVars)) {
+    data[key] = String(value);
+  }
+
+  const configMap = {
+    apiVersion: "v1",
+    kind: "ConfigMap",
+    metadata: {
+      name: cmName,
+      namespace: NAMESPACE,
+      labels: { app: name, "managed-by": "sarthiq" },
+    },
+    data,
+  };
+
+  const existing = await coreV1
+    .readNamespacedConfigMap({ name: cmName, namespace: NAMESPACE })
+    .catch(() => null);
+
+  if (existing) {
+    await coreV1.replaceNamespacedConfigMap({
+      name: cmName,
+      namespace: NAMESPACE,
+      body: configMap,
+    });
+  } else {
+    await coreV1.createNamespacedConfigMap({
+      namespace: NAMESPACE,
+      body: configMap,
+    });
+  }
+
+  return cmName;
+}
+
+/* ------------------------------------------------------------------ */
 /* SCALE: replicas (0 = sleep, 1 = wake)                               */
 /* ------------------------------------------------------------------ */
 async function scaleDeployment(name, replicas) {
@@ -358,6 +420,7 @@ module.exports = {
   createDeployment,
   createService,
   createIngress,
+  createOrUpdateConfigMap,
   scaleDeployment,
   waitForReady,
   deleteProjectResources,

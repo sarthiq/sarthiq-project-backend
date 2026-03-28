@@ -13,6 +13,12 @@ module.exports = `#graphql
     subdomain: String
     customDomain: String
     envVariables: String
+    detectedLanguage: String
+    detectedFramework: String
+    detectedBuildCommand: String
+    detectedStartCommand: String
+    detectedPort: Int
+    isStaticSite: Boolean
     UserId: Int!
     DockerInfo: DockerInfo
   }

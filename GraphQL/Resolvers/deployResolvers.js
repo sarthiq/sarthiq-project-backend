@@ -23,6 +23,16 @@ try {
 }
 
 module.exports = {
+  // Field resolvers for DeploymentJob
+  DeploymentJob: {
+    aiDiagnosis: (parent) => {
+      if (typeof parent.aiDiagnosis === "object" && parent.aiDiagnosis !== null) {
+        return JSON.stringify(parent.aiDiagnosis);
+      }
+      return parent.aiDiagnosis || null;
+    },
+  },
+
   Query: {
     /* ── Get a single deployment job by ID ─────────────────────── */
     getDeployStatus: async (_, { jobId }, context) => {

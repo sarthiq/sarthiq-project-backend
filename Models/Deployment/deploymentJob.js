@@ -37,6 +37,20 @@ const DeploymentJob = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    // ── AI auto-debug tracking ──────────────────────────────────
+    retryCount: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+      allowNull: false,
+    },
+    aiDiagnosis: {
+      type: DataTypes.JSON, // Array of DebugResult objects from each attempt
+      allowNull: true,
+    },
+    generatedDockerfile: {
+      type: DataTypes.TEXT("long"), // The Dockerfile actually used for the build
+      allowNull: true,
+    },
     startedAt: {
       type: DataTypes.DATE,
       allowNull: true,

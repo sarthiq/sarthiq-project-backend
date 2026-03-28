@@ -6,6 +6,9 @@ module.exports = `#graphql
     status: String       # queued | building | running | sleeping | failed | done
     logs: String
     errorMessage: String
+    retryCount: Int
+    aiDiagnosis: String        # JSON array of AI diagnosis results
+    generatedDockerfile: String
     startedAt: String
     completedAt: String
     ProjectId: Int

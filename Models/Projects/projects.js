@@ -59,6 +59,32 @@ const Project = sequelize.define(
       type: DataTypes.JSON,
       allowNull: false,
     },
+    // ── AI-detected metadata (auto-populated by aiStackDetector) ──
+    detectedLanguage: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    detectedFramework: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    detectedBuildCommand: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    detectedStartCommand: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    detectedPort: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    isStaticSite: {
+      type: DataTypes.BOOLEAN,
+      allowNull: true,
+      defaultValue: false,
+    },
     UserId: {
       type: DataTypes.INTEGER,
       allowNull: false,
