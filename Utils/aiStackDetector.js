@@ -250,6 +250,20 @@ function heuristicDetect(buildContext) {
     }
   }
 
+  /* ── Vanilla HTML/JS ─────────────────────────────────────────── */
+  if (fs.existsSync(path.join(buildContext, "index.html")) && !fs.existsSync(pkgPath)) {
+    return {
+      language: "html",
+      framework: "vanilla",
+      buildCommand: null,
+      startCommand: null,
+      port: 80,
+      isStaticSite: true,
+      buildOutputDir: ".",
+      packageManager: "none",
+    };
+  }
+
   /* ── Python ──────────────────────────────────────────────────── */
   if (
     fs.existsSync(reqPath) ||
@@ -408,8 +422,20 @@ RUN ${buildCommand || "npm run build"}
 
 FROM nginx:alpine
 COPY --from=builder /app/${buildOutputDir || "dist"} /usr/share/nginx/html
-# SPA fallback: serve index.html for all routes
-RUN echo 'server { listen 80; root /usr/share/nginx/html; index index.html; location / { try_files \\$uri \\$uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf
+# SPA fallback: serve index.html for all routes, carefully escaping $uri
+RUN printf 'server { listen 80; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+`.trim();
+  }
+
+  /* ── Vanilla HTML/JS Static ───────────────────────────────────── */
+  if (language === "html" && isStaticSite) {
+    return `
+FROM nginx:alpine
+COPY . /usr/share/nginx/html
+# SPA fallback: serve index.html for all routes, carefully escaping $uri
+RUN printf 'server { listen 80; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 `.trim();
