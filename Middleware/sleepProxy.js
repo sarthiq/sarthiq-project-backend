@@ -34,6 +34,7 @@ const Project = require("../Models/Projects/projects");
 const DeploymentJob = require("../Models/Deployment/deploymentJob");
 const { wakeQueue } = require("../Jobs/queues");
 const { getServiceClusterIP } = require("../Utils/kubeClient");
+const { escapeHtml } = require("../Utils/securityValidator");
 
 const BASE_DOMAIN = process.env.BASE_DOMAIN || "sarthiq.com";
 const NAMESPACE = process.env.K8S_NAMESPACE || "sarthiq-apps";
@@ -46,13 +47,16 @@ const redis = new IORedis({
   maxRetriesPerRequest: null,
 });
 
-/* ── HTML Templates ─────────────────────────────────────────────── */
-const loadingPage = (projectTitle, projectId) => `<!DOCTYPE html>
+/* ── HTML Templates (─ SECURITY: all dynamic values HTML-escaped) ── */
+const loadingPage = (projectTitle, projectId) => {
+  const safeTitle = escapeHtml(projectTitle);
+  const safeId = escapeHtml(String(projectId));
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Waking ${projectTitle}… | SarthiQ</title>
+  <title>Waking ${safeTitle}… | SarthiQ</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -91,7 +95,7 @@ const loadingPage = (projectTitle, projectId) => `<!DOCTYPE html>
   <div class="logo">SarthiQ</div>
   <div class="card">
     <div class="icon">🚀</div>
-    <h1>Waking <em>${projectTitle}</em></h1>
+    <h1>Waking <em>${safeTitle}</em></h1>
     <p>
       This service was asleep due to inactivity.<br>
       It's booting up — this usually takes 5–30 seconds.
@@ -117,7 +121,7 @@ const loadingPage = (projectTitle, projectId) => `<!DOCTYPE html>
     // Poll wake status every 2 seconds
     async function poll() {
       try {
-        const r = await fetch('/api/proxy/wake-status/${projectId}');
+        const r = await fetch('/api/proxy/wake-status/${safeId}');
         const data = await r.json();
         if (data.status === 'running') {
           clearInterval(interval);
@@ -131,11 +135,14 @@ const loadingPage = (projectTitle, projectId) => `<!DOCTYPE html>
   </script>
 </body>
 </html>`;
+};
 
-const buildingPage = (projectTitle) => `<!DOCTYPE html>
+const buildingPage = (projectTitle) => {
+  const safeTitle = escapeHtml(projectTitle);
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"><title>Building ${projectTitle} | SarthiQ</title>
+  <meta charset="UTF-8"><title>Building ${safeTitle} | SarthiQ</title>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -151,15 +158,19 @@ const buildingPage = (projectTitle) => `<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="icon pulse">⚙️</div>
-    <h1>Deploying <em>${projectTitle}</em></h1>
+    <h1>Deploying <em>${safeTitle}</em></h1>
     <p>Your project is currently being built and deployed.<br>
        This page will auto-refresh every 5 seconds.</p>
   </div>
   <script>setTimeout(()=>location.reload(),5000)</script>
 </body>
 </html>`;
+};
 
-const errorPage = (projectTitle, errorMsg) => `<!DOCTYPE html>
+const errorPage = (projectTitle, errorMsg) => {
+  const safeTitle = escapeHtml(projectTitle);
+  const safeError = escapeHtml(errorMsg || "");
+  return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Deploy Failed | SarthiQ</title>
 <style>
@@ -177,12 +188,13 @@ const errorPage = (projectTitle, errorMsg) => `<!DOCTYPE html>
 <body>
   <div class="card">
     <div style="font-size:48px;margin-bottom:20px">❌</div>
-    <h1>Deploy failed for <em>${projectTitle}</em></h1>
+    <h1>Deploy failed for <em>${safeTitle}</em></h1>
     <p>The last deployment encountered an error. Please check your project settings.</p>
-    ${errorMsg ? `<div class="err">${errorMsg}</div>` : ""}
+    ${safeError ? `<div class="err">${safeError}</div>` : ""}
   </div>
 </body>
 </html>`;
+};
 
 /* ── Dynamic in-memory proxy cache ──────────────────────────────── */
 // Map<subdomain, proxyMiddleware>
@@ -336,6 +348,10 @@ const router = express.Router();
 // Wake status polling endpoint (called by loading page JS)
 router.get("/wake-status/:projectId", async (req, res) => {
   const { projectId } = req.params;
+  // Security: validate projectId is numeric
+  if (!/^\d+$/.test(projectId)) {
+    return res.status(400).json({ error: "Invalid project ID" });
+  }
   const docker = await DockerInfo.findOne({ where: { ProjectId: projectId } });
   res.json({ status: docker?.status || "unknown" });
 });

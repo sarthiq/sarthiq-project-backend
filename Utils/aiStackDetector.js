@@ -13,6 +13,7 @@
 const fs = require("fs");
 const path = require("path");
 const OpenAI = require("openai");
+const { validateDockerfile, validateBuildCommand } = require("./securityValidator");
 
 // Lazy-init: OpenAI client created on first use (dotenv may not have run yet)
 let _openai = null;
@@ -86,7 +87,22 @@ function getFileTree(dir, depth = 0, maxDepth = 2) {
         entry.name === ".git" ||
         entry.name === "__pycache__" ||
         entry.name === "venv" ||
-        entry.name === ".venv"
+        entry.name === ".venv" ||
+        // ── Security: hide secret files from AI analysis ──
+        entry.name === ".env" ||
+        entry.name === ".env.local" ||
+        entry.name === ".env.production" ||
+        entry.name === ".env.development" ||
+        entry.name.endsWith(".key") ||
+        entry.name.endsWith(".pem") ||
+        entry.name.endsWith(".p12") ||
+        entry.name === ".git-credentials" ||
+        entry.name === ".npmrc" ||
+        entry.name === ".pypirc" ||
+        entry.name === "id_rsa" ||
+        entry.name === "id_ed25519" ||
+        entry.name === ".docker" ||
+        entry.name === ".kube"
       )
         continue;
 
@@ -174,7 +190,7 @@ function heuristicDetect(buildContext) {
           framework: "react",
           buildCommand: "npm run build",
           startCommand: null,
-          port: 80,
+          port: 8080,
           isStaticSite: true,
           buildOutputDir: "build",
           packageManager: detectPackageManager(buildContext),
@@ -190,7 +206,7 @@ function heuristicDetect(buildContext) {
           framework: isVue ? "vue" : isReact ? "react-vite" : "vite",
           buildCommand: "npm run build",
           startCommand: null,
-          port: 80,
+          port: 8080,
           isStaticSite: true,
           buildOutputDir: "dist",
           packageManager: detectPackageManager(buildContext),
@@ -204,7 +220,7 @@ function heuristicDetect(buildContext) {
           framework: "angular",
           buildCommand: "npm run build",
           startCommand: null,
-          port: 80,
+          port: 8080,
           isStaticSite: true,
           buildOutputDir: `dist/${pkg.name || "app"}`,
           packageManager: detectPackageManager(buildContext),
@@ -256,8 +272,8 @@ function heuristicDetect(buildContext) {
       language: "html",
       framework: "vanilla",
       buildCommand: null,
-      startCommand: null,
-      port: 80,
+      startCommand: "npx serve -s .",
+      port: 8080,
       isStaticSite: true,
       buildOutputDir: ".",
       packageManager: "none",
@@ -420,11 +436,13 @@ COPY . .
 ${buildArgLines}
 RUN ${buildCommand || "npm run build"}
 
-FROM nginx:alpine
+FROM nginxinc/nginx-unprivileged:alpine
 COPY --from=builder /app/${buildOutputDir || "dist"} /usr/share/nginx/html
 # SPA fallback: serve index.html for all routes, carefully escaping $uri
-RUN printf 'server { listen 80; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
-EXPOSE 80
+USER root
+RUN printf 'server { listen 8080; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
+USER nginx
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]
 `.trim();
   }
@@ -432,11 +450,13 @@ CMD ["nginx", "-g", "daemon off;"]
   /* ── Vanilla HTML/JS Static ───────────────────────────────────── */
   if (language === "html" && isStaticSite) {
     return `
-FROM nginx:alpine
+FROM nginxinc/nginx-unprivileged:alpine
 COPY . /usr/share/nginx/html
 # SPA fallback: serve index.html for all routes, carefully escaping $uri
-RUN printf 'server { listen 80; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
-EXPOSE 80
+USER root
+RUN printf 'server { listen 8080; root /usr/share/nginx/html; index index.html; location / { try_files %suri %suri/ /index.html; } }' '$' '$' > /etc/nginx/conf.d/default.conf
+USER nginx
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]
 `.trim();
   }
@@ -557,7 +577,16 @@ async function aiDetect(buildContext) {
     if (content) keyFiles[file] = content.slice(0, 3000); // truncate
   }
 
-  const prompt = `You are a DevOps expert. Analyze this Git repository and determine the deployment configuration.
+  const prompt = `You are a DevOps expert analyzing a Git repository for deployment configuration.
+
+## SECURITY RULES (MANDATORY — DO NOT VIOLATE):
+- NEVER include 'curl | bash', 'wget | sh', or any pipe-to-shell patterns in commands or Dockerfiles
+- NEVER use '--privileged' flag in any Docker command
+- NEVER mount /var/run/docker.sock
+- NEVER include 'nsenter', 'mount /proc', or host namespace access
+- NEVER include secrets, API keys, or credentials in the output
+- Generated Dockerfiles MUST end with a non-root USER instruction (e.g., USER 1000) unless using nginx
+- Only use official base images (node, python, golang, nginx, alpine)
 
 ## Repository File Structure:
 ${fileTree}
@@ -590,7 +619,28 @@ ${Object.entries(keyFiles)
     });
 
     const raw = response.choices[0]?.message?.content;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+
+    // ── Security: Validate AI-returned Dockerfile ──
+    if (parsed.dockerfile) {
+      const validation = validateDockerfile(parsed.dockerfile);
+      if (!validation.safe) {
+        console.warn(
+          `[aiStackDetector] AI-generated Dockerfile REJECTED: ${validation.violations.join("; ")}`
+        );
+        parsed.dockerfile = null; // Force template fallback
+      }
+    }
+
+    // ── Security: Validate AI-returned commands ──
+    try {
+      if (parsed.buildCommand) validateBuildCommand(parsed.buildCommand);
+    } catch {
+      console.warn(`[aiStackDetector] AI buildCommand rejected: ${parsed.buildCommand}`);
+      parsed.buildCommand = null;
+    }
+
+    return parsed;
   } catch (err) {
     console.error("[aiStackDetector] OpenAI call failed:", err.message);
     return null;

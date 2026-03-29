@@ -6,6 +6,15 @@ const { deleteProjectResources } = require("../../Utils/kubeClient");
 const { logUserActivity } = require("../../Utils/activityLoggers");
 const { Op } = require("sequelize");
 
+// ── Security validators ──
+const {
+  validateRepoUrl,
+  validateBranch,
+  validateEnvVars,
+  validateProjectDirectory,
+  validateBuildCommand,
+} = require("../../Utils/securityValidator");
+
 module.exports = {
   Project: {
     envVariables: (parent) => {
@@ -58,6 +67,21 @@ module.exports = {
           throw new Error("Free tier limit reached. Cannot create more projects.");
         }
 
+        // ── Security: Validate all user inputs before DB operations ──
+        validateRepoUrl(input.projectRepoUrl);
+        validateBranch(input.branch);
+        validateProjectDirectory(input.projectDirectory);
+        if (input.buildCommand) validateBuildCommand(input.buildCommand);
+
+        // Validate env vars
+        let parsedEnvVars = {};
+        try {
+          parsedEnvVars = JSON.parse(input.envVariables || "{}");
+        } catch {
+          throw new Error("Invalid envVariables JSON format.");
+        }
+        validateEnvVars(parsedEnvVars);
+
         const newProject = await Project.create({
           title: input.title,
           description: input.description,
@@ -68,7 +92,7 @@ module.exports = {
           projectDirectory: input.projectDirectory,
           buildCommand: input.buildCommand,
           buildDirectory: input.buildDirectory,
-          envVariables: JSON.parse(input.envVariables || "{}"),
+          envVariables: parsedEnvVars,
           UserId: userId,
         });
 
@@ -113,15 +137,36 @@ module.exports = {
         const updateData = {};
         if (input.title !== undefined) updateData.title = input.title;
         if (input.description !== undefined) updateData.description = input.description;
-        if (input.projectRepoUrl !== undefined) updateData.projectRepoUrl = input.projectRepoUrl;
+
+        // Security: validate inputs that affect deployment
+        if (input.projectRepoUrl !== undefined) {
+          validateRepoUrl(input.projectRepoUrl);
+          updateData.projectRepoUrl = input.projectRepoUrl;
+        }
         if (input.projectLanguage !== undefined) updateData.projectLanguage = input.projectLanguage;
         if (input.frameWork !== undefined) updateData.frameWork = input.frameWork;
-        if (input.branch !== undefined) updateData.branch = input.branch;
-        if (input.projectDirectory !== undefined) updateData.projectDirectory = input.projectDirectory;
-        if (input.buildCommand !== undefined) updateData.buildCommand = input.buildCommand;
+        if (input.branch !== undefined) {
+          validateBranch(input.branch);
+          updateData.branch = input.branch;
+        }
+        if (input.projectDirectory !== undefined) {
+          validateProjectDirectory(input.projectDirectory);
+          updateData.projectDirectory = input.projectDirectory;
+        }
+        if (input.buildCommand !== undefined) {
+          if (input.buildCommand) validateBuildCommand(input.buildCommand);
+          updateData.buildCommand = input.buildCommand;
+        }
         if (input.buildDirectory !== undefined) updateData.buildDirectory = input.buildDirectory;
         if (input.envVariables !== undefined) {
-          updateData.envVariables = JSON.parse(input.envVariables || "{}");
+          let parsedVars = {};
+          try {
+            parsedVars = JSON.parse(input.envVariables || "{}");
+          } catch {
+            throw new Error("Invalid envVariables JSON format.");
+          }
+          validateEnvVars(parsedVars);
+          updateData.envVariables = parsedVars;
         }
 
         await project.update(updateData);

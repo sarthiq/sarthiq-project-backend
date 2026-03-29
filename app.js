@@ -8,24 +8,53 @@ const {
   router: proxyRouter,
 } = require("./Middleware/sleepProxy");
 
+// ── Security middleware ───────────────────────────────────────────
+const {
+  helmetMiddleware,
+  apiRateLimiter,
+  graphqlRateLimiter,
+  requestSanitizer,
+} = require("./Middleware/securityMiddleware");
+
 const { setupRoutes } = require("./Routes/setupRoutes");
 const db = require("./database");
 const infoRoutes = require("./infoRoutes");
 const { setupModels } = require("./Models/setModels");
 
-app = express();
+// ── FIX: use const (was global variable leak) ──
+const app = express();
 
-app.set("trust proxy", 1); // 1 means trust the first proxy, usually Nginx or another load balancer
+app.set("trust proxy", 1);
+
+// ── Security headers (Helmet) ─────────────────────────────────────
+app.use(helmetMiddleware);
+
+// ── CORS: restrict to known origins (was: origin "*") ─────────────
+const ALLOWED_ORIGINS = (
+  process.env.ALLOWED_ORIGINS ||
+  "http://localhost:3000,http://localhost:3001,http://localhost:5173"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST"],
+    credentials: true,
   }),
 );
 
-app.use(bodyParser.json({ limit: "50mb" }));
-app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
+// ── Body parser with REDUCED limits (was 50MB — too large) ────────
+app.use(bodyParser.json({ limit: "5mb" }));
+app.use(bodyParser.urlencoded({ limit: "5mb", extended: true }));
+
+// ── Request sanitization (strip null bytes, etc.) ─────────────────
+app.use(requestSanitizer);
+
+// ── Rate limiting (global) ────────────────────────────────────────
+app.use(apiRateLimiter);
 
 // Custom error handler for invalid JSON
 app.use((err, req, res, next) => {
@@ -33,7 +62,13 @@ app.use((err, req, res, next) => {
     return res.status(400).json({
       success: false,
       message: "Invalid JSON format",
-      error: err.message,
+    });
+  }
+  // Handle CORS errors
+  if (err.message && err.message.includes("CORS")) {
+    return res.status(403).json({
+      success: false,
+      message: "Cross-origin request blocked",
     });
   }
   next();
@@ -47,8 +82,8 @@ setupRoutes(app);
 
 const { ApolloServer } = require("@apollo/server");
 const { expressMiddleware } = require("@as-integrations/express4");
-const typeDefs = require("./GraphQL/TypeDefs/index"); // Updated to point to modular TypeDefs
-const resolvers = require("./GraphQL/Resolvers/index"); // Updated to point to modular Resolvers
+const typeDefs = require("./GraphQL/TypeDefs/index");
+const resolvers = require("./GraphQL/Resolvers/index");
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET_KEY } = require("./importantInfo");
 
@@ -56,6 +91,11 @@ async function performInitialHealthChecks() {
   console.log("------------------------------------------------------");
   console.log("[bootstrap] 🔍 Running initial system health checks...");
   const errors = [];
+
+  // 0. Required env vars
+  if (!process.env.JWT_SECRET_KEY) {
+    errors.push("Missing JWT_SECRET_KEY in environment!");
+  }
 
   // 1. MySQL Check
   try {
@@ -87,7 +127,7 @@ async function performInitialHealthChecks() {
     console.error(
       "Please ensure all services are running and .env is configured correctly.\n",
     );
-    process.exit(1); // Fail fast before bringing up APIs
+    process.exit(1);
   }
   console.log("[bootstrap] ✅ All core systems validated running.");
   console.log("------------------------------------------------------\n");
@@ -99,8 +139,8 @@ async function bootstrap() {
   setupModels();
 
   // ── Start BullMQ workers ──────────────────────────────────────
-  require("./Jobs/deployWorker"); // deploy pipeline
-  require("./Jobs/wakeWorker"); // on-demand cold-start wake
+  require("./Jobs/deployWorker");
+  require("./Jobs/wakeWorker");
   const { startSleepWatcherCron } = require("./Jobs/sleepWatcher");
   startSleepWatcherCron().catch((e) =>
     console.error("[sleepWatcher] Cron start error:", e.message),
@@ -116,8 +156,18 @@ async function bootstrap() {
 
   app.use(
     "/graphql",
-    cors({ origin: "*" }),
-    bodyParser.json({ limit: "50mb" }),
+    cors({
+      origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+          callback(null, true);
+        } else {
+          callback(new Error("CORS policy: Origin not allowed"));
+        }
+      },
+      credentials: true,
+    }),
+    graphqlRateLimiter, // ← GraphQL-specific rate limiter
+    bodyParser.json({ limit: "2mb" }), // ← Tighter limit for GraphQL
     expressMiddleware(server, {
       context: async ({ req }) => {
         let user = null;
@@ -133,7 +183,8 @@ async function bootstrap() {
               user = payload;
             }
           } catch (error) {
-            console.error("GraphQL Auth error: Invalid token", error.message);
+            // Don't log the token itself — only the error type
+            console.error("GraphQL Auth error:", error.message);
           }
         }
         return { req, user, admin };

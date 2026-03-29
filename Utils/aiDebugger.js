@@ -10,6 +10,7 @@
  *   4. A shouldRetry flag
  */
 const OpenAI = require("openai");
+const { validateDockerfile, sanitizeLogLine } = require("./securityValidator");
 
 // Lazy-init: OpenAI client created on first use (dotenv may not have run yet)
 let _openai = null;
@@ -66,6 +67,9 @@ async function diagnoseError({
       ? "...(truncated)...\n" + errorLogs.slice(-MAX_LOG_CHARS)
       : errorLogs;
 
+  // Security: sanitize logs before sending to AI (strip secrets)
+  const sanitizedLogs = sanitizeLogLine(truncatedLogs);
+
   const previousAttemptsText =
     previousAttempts.length > 0
       ? previousAttempts
@@ -78,6 +82,14 @@ async function diagnoseError({
 
   const prompt = `You are a cloud deployment debugging expert. A deployment has failed during the "${errorPhase}" phase.
 Analyze the error and provide a fix.
+
+## SECURITY RULES (MANDATORY — DO NOT VIOLATE):
+- NEVER include 'curl | bash', 'wget | sh', or any pipe-to-shell patterns
+- NEVER use '--privileged' flag
+- NEVER mount /var/run/docker.sock
+- NEVER include 'nsenter', 'mount /proc', or host namespace access
+- Fixed Dockerfiles MUST use official base images only
+- NEVER include secrets, API keys, or credentials in output
 
 ## Project Info:
 - Language: ${language || "unknown"}
@@ -92,7 +104,7 @@ ${dockerfileContent || "Not available"}
 
 ## Error Logs (last lines):
 \`\`\`
-${truncatedLogs}
+${sanitizedLogs}
 \`\`\`
 
 ## Previous Fix Attempts:
@@ -121,28 +133,41 @@ ${previousAttemptsText}
     });
 
     const raw = response.choices[0]?.message?.content;
-    const result = JSON.parse(raw);
+    const result_raw = JSON.parse(raw);
 
     // Validate required fields
-    return {
-      diagnosis: result.diagnosis || "Unable to determine the cause.",
-      errorCategory: result.errorCategory || "unknown",
-      fixedDockerfile: result.fixedDockerfile || null,
-      fixedBuildCommand: result.fixedBuildCommand || null,
-      fixedStartCommand: result.fixedStartCommand || null,
-      fixedPort: result.fixedPort || null,
-      missingEnvVars: result.missingEnvVars || [],
+    const result = {
+      diagnosis: result_raw.diagnosis || "Unable to determine the cause.",
+      errorCategory: result_raw.errorCategory || "unknown",
+      fixedDockerfile: result_raw.fixedDockerfile || null,
+      fixedBuildCommand: result_raw.fixedBuildCommand || null,
+      fixedStartCommand: result_raw.fixedStartCommand || null,
+      fixedPort: result_raw.fixedPort || null,
+      missingEnvVars: result_raw.missingEnvVars || [],
       confidence:
-        typeof result.confidence === "number" ? result.confidence : 0.5,
+        typeof result_raw.confidence === "number" ? result_raw.confidence : 0.5,
       shouldRetry:
-        typeof result.shouldRetry === "boolean" ? result.shouldRetry : false,
+        typeof result_raw.shouldRetry === "boolean" ? result_raw.shouldRetry : false,
     };
+
+    // Security: Validate AI-returned fixedDockerfile
+    if (result.fixedDockerfile) {
+      const validation = validateDockerfile(result.fixedDockerfile);
+      if (!validation.safe) {
+        console.warn(
+          `[aiDebugger] AI fixedDockerfile REJECTED: ${validation.violations.join("; ")}`
+        );
+        result.fixedDockerfile = null; // Discard unsafe suggestion
+      }
+    }
+
+    return result;
   } catch (err) {
     console.error("[aiDebugger] OpenAI call failed:", err.message);
 
-    // Return a safe non-retryable result when AI is unreachable
+    // Return a safe non-retryable result when AI is unreachable. Do not leak err.message as it may contain API keys.
     return {
-      diagnosis: `AI debugger unavailable: ${err.message}. Manual inspection required.`,
+      diagnosis: "AI debugger is currently unavailable (API authentication or network error). Manual inspection of logs required.",
       errorCategory: "unknown",
       fixedDockerfile: null,
       fixedBuildCommand: null,

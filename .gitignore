@@ -1,4 +1,15 @@
 node_modules
 .env
+.env.*
+.env.local
+.env.production
+.env.development
+*.key
+*.pem
+*.p12
 CustomFiles
 temp
+Temp
+*.log
+.docker
+.kube
