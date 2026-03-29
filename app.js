@@ -21,6 +21,11 @@ const db = require("./database");
 const infoRoutes = require("./infoRoutes");
 const { setupModels } = require("./Models/setModels");
 
+// ── GitHub App ────────────────────────────────────────────────────
+const githubWebhookRouter = require("./Routes/User/githubWebhook");
+const { handleSetupRedirect } = require("./Controller/User/githubController");
+const { initGithubApp, checkGithubCredentials } = require("./Utils/githubApp");
+
 // ── FIX: use const (was global variable leak) ──
 const app = express();
 
@@ -41,10 +46,24 @@ const ALLOWED_ORIGINS = (
 app.use(
   cors({
     origin: "*",
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "DELETE"],
     credentials: true,
   }),
 );
+
+// ── GitHub Webhook (MUST be before bodyParser to preserve raw body) ─
+app.use(
+  "/api/github/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res, next) => {
+    req.rawBody = req.body; // Store raw Buffer for HMAC verification
+    next();
+  },
+  githubWebhookRouter
+);
+
+// ── GitHub Setup URL redirect (non-API route) ─────────────────────
+app.get("/github/setup", handleSetupRedirect);
 
 // ── Body parser with REDUCED limits (was 50MB — too large) ────────
 app.use(bodyParser.json({ limit: "5mb" }));
@@ -121,6 +140,15 @@ async function performInitialHealthChecks() {
     );
   }
 
+  // 4. GitHub Credentials Check
+  const missingGithubEnv = checkGithubCredentials();
+  if (missingGithubEnv.length > 0) {
+    console.warn(`\n⚠️  [githubApp] WARNING: Missing GitHub configurations: ${missingGithubEnv.join(", ")}`);
+    console.warn("   GitHub integration features will be disabled until these are configured.\n");
+  } else {
+    console.log("  ✓ GitHub App credentials found");
+  }
+
   if (errors.length > 0) {
     console.error("\n❌ [bootstrap] CRITICAL STARTUP CHECKS FAILED:");
     errors.forEach((e) => console.error(`   - ${e}`));
@@ -135,6 +163,9 @@ async function performInitialHealthChecks() {
 
 async function bootstrap() {
   await performInitialHealthChecks();
+
+  // ── Initialize GitHub App (non-fatal if env not set) ────────────
+  initGithubApp();
 
   setupModels();
 

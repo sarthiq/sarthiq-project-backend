@@ -2,6 +2,7 @@ const DockerInfo = require("./Projects/dockerInfo");
 const Project = require("./Projects/projects");
 const TierConfig = require("./Projects/tierConfig");
 const DeploymentJob = require("./Deployment/deploymentJob");
+const GithubInstallation = require("./Projects/githubInstallation");
 // KubeNode is standalone (no FK associations needed)
 require("./Deployment/kubeNode");
 
@@ -17,4 +18,5 @@ exports.setupModels = async () => {
   await DockerInfo.sync({ alter: true });
   await Project.sync({ alter: true });
   await DeploymentJob.sync({ alter: true });
+  await GithubInstallation.sync({ alter: true });
 };

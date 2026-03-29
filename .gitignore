@@ -13,3 +13,5 @@ Temp
 *.log
 .docker
 .kube
+
+sarthiq-github-private-key.pem

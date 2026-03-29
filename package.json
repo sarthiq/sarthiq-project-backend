@@ -14,6 +14,8 @@
     "@as-integrations/express4": "^1.1.2",
     "@huggingface/inference": "^3.4.0",
     "@kubernetes/client-node": "^1.4.0",
+    "@octokit/app": "^13.1.8",
+    "@octokit/rest": "^19.0.13",
     "axios": "^1.8.1",
     "bcrypt": "^5.1.1",
     "bullmq": "^5.71.0",
