@@ -15,4 +15,6 @@ exports.setupModels = async () => {
   DeploymentJob.belongsTo(Project, { foreignKey: "ProjectId" });
 
   await DockerInfo.sync({ alter: true });
+  await Project.sync({ alter: true });
+  await DeploymentJob.sync({ alter: true });
 };
