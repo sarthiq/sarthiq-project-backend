@@ -142,10 +142,13 @@ async function bootstrap() {
   require("./Jobs/deployWorker");
   require("./Jobs/wakeWorker");
   const { startSleepWatcherCron } = require("./Jobs/sleepWatcher");
+  const { startCleanupCron } = require("./Jobs/cleanupCron");
+
   startSleepWatcherCron().catch((e) =>
     console.error("[sleepWatcher] Cron start error:", e.message),
   );
-  console.log("[bootstrap] BullMQ workers started");
+  startCleanupCron();
+  console.log("[bootstrap] BullMQ workers & cron jobs started");
 
   const server = new ApolloServer({
     typeDefs,
