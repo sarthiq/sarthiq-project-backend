@@ -179,6 +179,10 @@ exports.handleSetupRedirect = async (req, res) => {
 exports.getRepos = async (req, res) => {
   try {
     const userId = req.user.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 30;
+    const search = req.query.search || "";
+    const filter = req.query.filter || "all";
 
     // Find the user's installation
     const installation = await GithubInstallation.findOne({
@@ -193,7 +197,15 @@ exports.getRepos = async (req, res) => {
     }
 
     // Fetch repos via installation token
-    const rawRepos = await getInstallationRepos(installation.installationId);
+    const { repos: rawRepos, totalCount } = await getInstallationRepos(
+      installation.installationId,
+      page,
+      limit,
+      search,
+      filter,
+      installation.accountLogin,
+      installation.accountType
+    );
 
     // Sanitize — only return what the frontend needs
     const repos = rawRepos.map((repo) => ({
@@ -213,11 +225,16 @@ exports.getRepos = async (req, res) => {
       },
     }));
 
+    const hasMore = page * limit < totalCount;
+
     return res.json({
       success: true,
       accountLogin: installation.accountLogin,
       accountType: installation.accountType,
       repos,
+      totalCount,
+      page,
+      hasMore,
     });
   } catch (err) {
     console.error("[github] getRepos error:", err.message);

@@ -103,19 +103,44 @@ async function getInstallationOctokit(installationId) {
 }
 
 /**
- * Fetch all repositories accessible to an installation.
- * Handles pagination automatically.
+ * Fetch a page of repositories accessible to an installation.
  * @param {number} installationId
- * @returns {Promise<Array>} Array of repository objects
+ * @param {number} page
+ * @param {number} perPage
+ * @param {string} search
+ * @param {string} filter
+ * @param {string} accountLogin
+ * @param {string} accountType
+ * @returns {Promise<{repos: Array, totalCount: number}>} Object containing repositories and total count
  */
-async function getInstallationRepos(installationId) {
+async function getInstallationRepos(installationId, page = 1, perPage = 30, search = "", filter = "all", accountLogin = "", accountType = "") {
   const octokit = await getInstallationOctokit(installationId);
 
-  const repos = [];
-  let page = 1;
-  const perPage = 100;
+  if (search || filter !== "all") {
+    let q = "";
+    if (search) {
+      q += `${search} in:name,description`;
+    }
 
-  while (true) {
+    if (accountType === "Organization") {
+      q += ` org:${accountLogin}`;
+    } else if (accountLogin) {
+      q += ` user:${accountLogin}`;
+    }
+
+    if (filter === "private") {
+      q += " is:private";
+    } else if (filter === "public") {
+      q += " is:public";
+    }
+
+    const { data } = await octokit.request("GET /search/repositories", {
+      q: q.trim(),
+      per_page: perPage,
+      page,
+    });
+    return { repos: data.items || [], totalCount: data.total_count || 0 };
+  } else {
     const { data } = await octokit.request(
       "GET /installation/repositories",
       {
@@ -123,16 +148,8 @@ async function getInstallationRepos(installationId) {
         page,
       }
     );
-
-    repos.push(...data.repositories);
-
-    if (repos.length >= data.total_count || data.repositories.length < perPage) {
-      break;
-    }
-    page++;
+    return { repos: data.repositories || [], totalCount: data.total_count || 0 };
   }
-
-  return repos;
 }
 
 /**
