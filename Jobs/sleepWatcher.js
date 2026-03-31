@@ -8,6 +8,11 @@
  *
  * Container wakes up automatically when the next HTTP request arrives
  * (handled by sleepProxy.js in the Middleware directory).
+ *
+ * IMPORTANT: Since K8s Ingress routes traffic directly to pods (bypassing
+ * the Node.js sleepProxy middleware), we ALSO check the NGINX Ingress
+ * controller's access logs for recent traffic to each subdomain. This
+ * ensures we don't sleep containers that are actively receiving traffic.
  */
 const { Worker } = require("bullmq");
 const { Op } = require("sequelize");
@@ -24,10 +29,94 @@ const KubeNode = require("../Models/Deployment/kubeNode");
 const kc = new k8s.KubeConfig();
 kc.loadFromDefault();
 const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
+const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
 // 15 minutes of inactivity → sleep
 const INACTIVITY_TIMEOUT_MS =
   parseInt(process.env.SLEEP_INACTIVITY_MINUTES || "15") * 60 * 1000;
+
+const INGRESS_NAMESPACE = "ingress-nginx";
+const INGRESS_SELECTOR = "app.kubernetes.io/component=controller";
+const BASE_DOMAIN = process.env.BASE_DOMAIN || "localhost";
+
+/* ------------------------------------------------------------------ */
+/* Helper: Check NGINX Ingress access logs for recent traffic          */
+/* Returns a Set of subdomains that had traffic in the last N minutes  */
+/* ------------------------------------------------------------------ */
+async function getActiveSubdomainsFromIngressLogs(sinceMinutes = 20) {
+  const activeSubdomains = new Map(); // subdomain → latest timestamp
+
+  try {
+    // Find ingress controller pod(s)
+    const pods = await coreV1.listNamespacedPod({
+      namespace: INGRESS_NAMESPACE,
+      labelSelector: INGRESS_SELECTOR,
+    });
+
+    if (!pods || !pods.items || pods.items.length === 0) {
+      console.log("[sleepWatcher] ⚠ No ingress controller pods found, skipping log check");
+      return activeSubdomains;
+    }
+
+    const sinceSeconds = sinceMinutes * 60;
+
+    for (const pod of pods.items) {
+      const podName = pod.metadata.name;
+
+      try {
+        // Read recent logs from ingress controller
+        const logResponse = await coreV1.readNamespacedPodLog({
+          name: podName,
+          namespace: INGRESS_NAMESPACE,
+          sinceSeconds,
+          tailLines: 2000, // cap to prevent memory issues
+        });
+
+        const logText = typeof logResponse === "string" ? logResponse : (logResponse?.body || "");
+        if (!logText) continue;
+
+        const lines = logText.split("\n");
+
+        for (const line of lines) {
+          // NGINX Ingress default log format includes the host in the request
+          // Format: IP - - [timestamp] "METHOD path HTTP/x.x" status ... "host" ...
+          // Or the combined format has host embedded
+          //
+          // Common patterns to match:
+          //   "Host: subdomain.localhost" or the host field in the log
+          //   The NGINX ingress log format (by default) includes the $host field
+
+          // Try to extract subdomain from the log line
+          // NGINX ingress default log format:
+          // <ip> - - [date] "request" status size "referer" "user-agent" <request_length> <request_time> [<upstream>] [<alt_upstream>] <response_length> <response_time> <status> <req_id>
+          // But the host can appear differently. Let's look for *.BASE_DOMAIN pattern
+
+          const hostRegex = new RegExp(`([a-z0-9][a-z0-9-]+)\\.${BASE_DOMAIN.replace(/\./g, "\\.")}`, "gi");
+          const matches = line.match(hostRegex);
+
+          if (matches) {
+            for (const fullHost of matches) {
+              const subdomain = fullHost.split(`.${BASE_DOMAIN}`)[0].toLowerCase();
+              // Skip system subdomains
+              if (subdomain === "www" || subdomain === "api" || subdomain === "admin") continue;
+
+              // Use current time as the "last seen" since these logs are recent
+              if (!activeSubdomains.has(subdomain)) {
+                activeSubdomains.set(subdomain, new Date());
+              }
+            }
+          }
+        }
+      } catch (logErr) {
+        console.log(`[sleepWatcher] ⚠ Could not read logs from ${podName}: ${logErr.message}`);
+      }
+    }
+  } catch (err) {
+    console.log(`[sleepWatcher] ⚠ Ingress log check failed: ${err.message}`);
+  }
+
+  return activeSubdomains;
+}
 
 /**
  * Check if a K8s deployment exists before attempting to scale it.
@@ -63,7 +152,53 @@ const sleepWatcher = new Worker(
       `[sleepWatcher] Checking for containers idle since ${cutoff.toISOString()}`
     );
 
-    // Find all running containers that haven't had activity
+    /* ── Step 1: Check Ingress logs for actual traffic ──────────── */
+    const activeFromIngress = await getActiveSubdomainsFromIngressLogs(20);
+    
+    if (activeFromIngress.size > 0) {
+      console.log(
+        `[sleepWatcher] Ingress logs show recent traffic for: ${[...activeFromIngress.keys()].join(", ")}`
+      );
+
+      // Update lastActivityAt for any subdomain that has real traffic
+      for (const [subdomain, lastSeen] of activeFromIngress) {
+        try {
+          const project = await Project.findOne({
+            where: { subdomain },
+            attributes: ["id"],
+          });
+
+          if (project) {
+            const [updatedCount] = await DockerInfo.update(
+              { lastActivityAt: lastSeen },
+              {
+                where: {
+                  ProjectId: project.id,
+                  status: "running",
+                  // Only update if the new timestamp is more recent
+                  lastActivityAt: { [Op.lt]: lastSeen },
+                },
+              }
+            );
+
+            if (updatedCount > 0) {
+              console.log(
+                `[sleepWatcher] ✓ Updated lastActivityAt for ${subdomain} (traffic detected in ingress logs)`
+              );
+            }
+          }
+        } catch (updateErr) {
+          console.error(
+            `[sleepWatcher] Failed to update activity for ${subdomain}: ${updateErr.message}`
+          );
+        }
+      }
+    } else {
+      console.log("[sleepWatcher] No recent traffic detected in ingress logs");
+    }
+
+    /* ── Step 2: Now do the normal idle check ───────────────────── */
+    // Re-query with updated timestamps
     const idleDockers = await DockerInfo.findAll({
       where: {
         status: "running",
