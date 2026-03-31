@@ -1,4 +1,5 @@
 require("dotenv").config();
+const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -17,6 +18,7 @@ const {
 } = require("./Middleware/securityMiddleware");
 
 const { setupRoutes } = require("./Routes/setupRoutes");
+const { initContainerWebSocket } = require("./Utils/containerService");
 const db = require("./database");
 const infoRoutes = require("./infoRoutes");
 const { setupModels } = require("./Models/setModels");
@@ -235,10 +237,20 @@ async function bootstrap() {
   db.sync()
     .then(() => {
       const port = process.env.APP_PORT || 3000;
-      app.listen(port);
+
+      // Create HTTP server wrapping Express (needed for WebSocket)
+      const server = http.createServer(app);
+
+      // Initialize WebSocket server for container terminal
+      initContainerWebSocket(server);
+
+      server.listen(port);
       console.log(`Listening to the port : ${port}`);
       console.log(
         `GraphQL endpoint available at http://localhost:${port}/graphql`,
+      );
+      console.log(
+        `WebSocket terminal available at ws://localhost:${port}/api/container/terminal`,
       );
     })
     .catch((err) => console.log(err));
