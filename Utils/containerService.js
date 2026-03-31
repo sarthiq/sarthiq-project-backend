@@ -241,12 +241,17 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
       available: true,
     };
   } catch (err) {
-    console.error("[containerService] Metrics fetch error:", err.message);
+    // Only log once to avoid spamming every 5 seconds when metrics-server is unavailable
+    if (!getPodMetrics._loggedError) {
+      console.warn("[containerService] Metrics server unavailable:", err.message.slice(0, 100));
+      console.warn("[containerService] (Suppressing further metrics errors — install metrics-server to enable live metrics)");
+      getPodMetrics._loggedError = true;
+    }
     return {
       cpu: { used: "0m", limit: dockerInfo.cpu, usedMillicores: 0, limitMillicores: parseCpuToMillicores(dockerInfo.cpu), percentage: 0 },
       memory: { used: "0Mi", limit: dockerInfo.memory, usedMi: 0, limitMi: parseMemoryToMi(dockerInfo.memory), percentage: 0 },
       available: false,
-      message: "Metrics server unavailable",
+      message: "Metrics server unavailable — install metrics-server addon",
     };
   }
 }

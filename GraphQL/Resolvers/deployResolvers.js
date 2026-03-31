@@ -167,8 +167,34 @@ module.exports = {
           status: { [Op.in]: ["queued", "building"] },
         },
       });
+
       if (inProgress) {
-        throw new Error("A deployment is already in progress for this project");
+        // Auto-clean stale jobs stuck for more than 10 minutes
+        const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
+        if (inProgress.createdAt < staleThreshold) {
+          console.log(
+            `[deploy] Auto-cleaning stale job #${inProgress.id} (status: ${inProgress.status}, created: ${inProgress.createdAt})`
+          );
+          await inProgress.update({
+            status: "failed",
+            errorMessage: "Auto-cleaned: job was stuck for over 10 minutes",
+            completedAt: new Date(),
+          });
+          // Also reset dockerInfo if it's stuck
+          await DockerInfo.update(
+            { status: "failed" },
+            {
+              where: {
+                ProjectId: projectId,
+                status: { [Op.in]: ["queued", "building"] },
+              },
+            }
+          );
+        } else {
+          throw new Error(
+            "A deployment is already in progress for this project"
+          );
+        }
       }
 
       // Create DB tracking record
@@ -224,6 +250,22 @@ module.exports = {
         status: "queued",
         logs: "[WAKE] Manual wake triggered by user\n",
       });
+
+      // Clean up any stale queued/building jobs for this project first
+      await DeploymentJob.update(
+        {
+          status: "failed",
+          errorMessage: "Superseded by wake request",
+          completedAt: new Date(),
+        },
+        {
+          where: {
+            ProjectId: parseInt(projectId),
+            status: { [Op.in]: ["queued", "building"] },
+            id: { [Op.ne]: dbJob.id }, // don't mark the one we just created
+          },
+        }
+      );
 
       const bullJob = await wakeQueue.add("wake", {
         projectId: parseInt(projectId),

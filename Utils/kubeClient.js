@@ -48,6 +48,42 @@ function safeLabel(name) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Helper: ensure a Kubernetes namespace exists (create if missing)      */
+/* ------------------------------------------------------------------ */
+const _nsCache = new Set(); // avoid repeated API calls for the same NS
+
+async function ensureNamespace(ns) {
+  if (_nsCache.has(ns)) return; // already verified this session
+
+  try {
+    await coreV1.readNamespace({ name: ns });
+    _nsCache.add(ns);
+  } catch (err) {
+    // Namespace doesn't exist — create it
+    try {
+      console.log(`[kubeClient] Namespace '${ns}' not found. Creating...`);
+      await coreV1.createNamespace({
+        body: {
+          apiVersion: "v1",
+          kind: "Namespace",
+          metadata: { name: ns },
+        },
+      });
+      _nsCache.add(ns);
+      console.log(`[kubeClient] ✓ Namespace '${ns}' created successfully`);
+    } catch (createErr) {
+      // 409 = already exists (race condition with another worker)
+      if (createErr.statusCode === 409 || createErr?.body?.code === 409) {
+        _nsCache.add(ns);
+        return;
+      }
+      console.error(`[kubeClient] ✗ Failed to create namespace '${ns}':`, createErr.message);
+      throw createErr;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* CREATE: Kubernetes Deployment                                        */
 /* ------------------------------------------------------------------ */
 async function createDeployment({
@@ -72,6 +108,9 @@ async function createDeployment({
 }) {
   const label = safeLabel(name);
   const targetNamespace = namespace || NAMESPACE;
+
+  // ── Ensure namespace exists BEFORE any namespaced operations ──
+  await ensureNamespace(targetNamespace);
 
   // Enforce resource caps
   const enforcedCpuLimit = enforceResourceCap(cpuLimit, MAX_CPU_LIMIT, "cpu");
@@ -190,19 +229,7 @@ async function createDeployment({
     },
   };
 
-  // Auto-create Namespace if it does not exist
-  try {
-    await coreV1.readNamespace(targetNamespace).catch(() => coreV1.readNamespace({ name: targetNamespace }));
-  } catch (err) {
-    if (err.statusCode === 404 || err?.response?.statusCode === 404 || err.message.includes("404")) {
-      console.log(`[kubeClient] Namespace '${targetNamespace}' not found. Creating it now...`);
-      await coreV1.createNamespace({
-        body: { apiVersion: "v1", kind: "Namespace", metadata: { name: targetNamespace } }
-      }).catch((e) => coreV1.createNamespace({
-        apiVersion: "v1", kind: "Namespace", metadata: { name: targetNamespace }
-      })).catch(console.error);
-    }
-  }
+  // Namespace already ensured at the top of createDeployment()
 
   const existing = await appsV1
     .readNamespacedDeployment({ name: label, namespace: targetNamespace })
@@ -517,6 +544,7 @@ module.exports = {
   deleteProjectResources,
   getNodeMetrics,
   getServiceClusterIP,
+  ensureNamespace,
   safeLabel,
   NAMESPACE,
 };
