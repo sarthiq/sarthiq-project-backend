@@ -171,6 +171,14 @@ async function bootstrap() {
 
   setupModels();
 
+  // ── Reconcile DB ↔ K8s state (fixes ghost 'running' records after restart) ──
+  const { reconcileOnStartup } = require("./Jobs/reconciler");
+  try {
+    await reconcileOnStartup();
+  } catch (reconcileErr) {
+    console.error("[bootstrap] ⚠ Reconciler failed (non-fatal):", reconcileErr.message);
+  }
+
   // ── Start BullMQ workers ──────────────────────────────────────
   require("./Jobs/deployWorker");
   require("./Jobs/wakeWorker");

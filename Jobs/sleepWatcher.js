@@ -11,17 +11,48 @@
  */
 const { Worker } = require("bullmq");
 const { Op } = require("sequelize");
+const k8s = require("@kubernetes/client-node");
 
 const { connection, sleepCheckQueue } = require("./queues");
 const DockerInfo = require("../Models/Projects/dockerInfo");
 const Project = require("../Models/Projects/projects");
-const { scaleDeployment } = require("../Utils/kubeClient");
+const { scaleDeployment, safeLabel, NAMESPACE } = require("../Utils/kubeClient");
 const { releaseNode } = require("../Utils/nodeManager");
 const KubeNode = require("../Models/Deployment/kubeNode");
+
+// Dedicated K8s client for pre-flight checks
+const kc = new k8s.KubeConfig();
+kc.loadFromDefault();
+const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
 
 // 15 minutes of inactivity → sleep
 const INACTIVITY_TIMEOUT_MS =
   parseInt(process.env.SLEEP_INACTIVITY_MINUTES || "15") * 60 * 1000;
+
+/**
+ * Check if a K8s deployment exists before attempting to scale it.
+ * @returns {boolean} true if deployment exists, false if not
+ */
+async function deploymentExists(subdomain) {
+  const label = safeLabel(subdomain);
+  try {
+    await appsV1.readNamespacedDeployment({
+      name: label,
+      namespace: NAMESPACE,
+    });
+    return true;
+  } catch (err) {
+    if (
+      err.statusCode === 404 ||
+      err?.response?.statusCode === 404 ||
+      err?.body?.code === 404
+    ) {
+      return false;
+    }
+    // Network/auth errors — assume it might exist, let scaleDeployment handle it
+    return true;
+  }
+}
 
 const sleepWatcher = new Worker(
   "sleepCheckQueue",
@@ -48,6 +79,31 @@ const sleepWatcher = new Worker(
       if (!project?.subdomain) continue;
 
       try {
+        // ── PRE-CHECK: Verify deployment exists in K8s ──────────
+        const exists = await deploymentExists(project.subdomain);
+
+        if (!exists) {
+          // Deployment was destroyed (e.g. system restart) — just fix DB
+          console.log(
+            `[sleepWatcher] ⚠ ${project.subdomain}: K8s deployment not found. Correcting DB → sleeping`
+          );
+          docker.status = "sleeping";
+          await docker.save();
+
+          // Release node capacity
+          if (docker.nodeId) {
+            const node = await KubeNode.findOne({
+              where: { nodeName: docker.nodeId },
+            });
+            if (node) {
+              await releaseNode(node.id);
+            }
+          }
+
+          console.log(`[sleepWatcher] ✓ ${project.subdomain} DB corrected to sleeping`);
+          continue; // Skip the scale call — nothing to scale
+        }
+
         console.log(
           `[sleepWatcher] Sleeping: ${project.subdomain} (idle since ${docker.lastActivityAt})`
         );
@@ -70,9 +126,23 @@ const sleepWatcher = new Worker(
 
         console.log(`[sleepWatcher] ✓ ${project.subdomain} is now sleeping`);
       } catch (err) {
-        console.error(
-          `[sleepWatcher] Failed to sleep ${project.subdomain}: ${err.message}`
-        );
+        // If scaleDeployment threw a 404, auto-correct instead of erroring
+        const is404 =
+          err.statusCode === 404 ||
+          err?.response?.statusCode === 404 ||
+          (err.message && err.message.includes("not found"));
+
+        if (is404) {
+          console.log(
+            `[sleepWatcher] ⚠ ${project.subdomain}: deployment not found (404). Correcting DB → sleeping`
+          );
+          docker.status = "sleeping";
+          await docker.save();
+        } else {
+          console.error(
+            `[sleepWatcher] Failed to sleep ${project.subdomain}: ${err.message}`
+          );
+        }
       }
     }
   },

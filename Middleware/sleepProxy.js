@@ -211,10 +211,38 @@ function getOrCreateProxy(subdomain) {
     changeOrigin: true,
     ws: true, // WebSocket support
     on: {
-      error: (err, req, res) => {
+      error: async (err, req, res) => {
         console.error(`[sleepProxy] Proxy error for ${subdomain}: ${err.message}`);
+
+        // ── AUTO-CORRECT: If proxy fails, the K8s service/pod likely doesn't exist ──
+        // Mark the project as sleeping so the next request serves the wake page
+        try {
+          const project = await Project.findOne({ where: { subdomain } });
+          if (project) {
+            const docker = await DockerInfo.findOne({
+              where: { ProjectId: project.id, status: "running" },
+            });
+            if (docker) {
+              console.log(
+                `[sleepProxy] ⚠ Auto-correcting ${subdomain}: proxy 502 → marking as sleeping`
+              );
+              docker.status = "sleeping";
+              await docker.save();
+              // Invalidate proxy cache so next request re-evaluates
+              proxyCache.delete(subdomain);
+            }
+          }
+        } catch (dbErr) {
+          console.error(`[sleepProxy] DB correction failed: ${dbErr.message}`);
+        }
+
         if (!res.headersSent) {
-          res.status(502).send("Bad Gateway – container may be restarting");
+          res.status(502).send(
+            `<meta http-equiv="refresh" content="2">` +
+            `<div style="font-family:system-ui;background:#0a0a0f;color:#e4e4e7;min-height:100vh;display:flex;align-items:center;justify-content:center;">` +
+            `<div style="text-align:center"><p style="font-size:48px;margin-bottom:16px">🔄</p>` +
+            `<h2>Container restarting…</h2><p style="color:#71717a;font-size:14px">This page will reload automatically.</p></div></div>`
+          );
         }
       },
     },

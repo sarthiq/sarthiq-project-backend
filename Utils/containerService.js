@@ -83,7 +83,22 @@ async function validateAndGetPod(userId, projectId) {
   );
 
   if (!runningPod) {
-    const err = new Error("No running pod found for this project");
+    // ── AUTO-CORRECT: DB says "running" but K8s has no pod ──────────
+    // This happens after system restart when K8s state is wiped.
+    // Fix the DB so the frontend shows "sleeping" + "Wake" button.
+    if (dockerInfo && dockerInfo.status === "running") {
+      console.log(
+        `[containerService] ⚠ Auto-correcting ghost pod: project ${projectId} DB says "running" but no K8s pod exists. Setting → sleeping`
+      );
+      await DockerInfo.update(
+        { status: "sleeping" },
+        { where: { id: dockerInfo.id } }
+      );
+    }
+
+    const err = new Error(
+      "No running pod found for this project. The container may have been stopped — try waking it."
+    );
     err.statusCode = 404;
     throw err;
   }
