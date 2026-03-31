@@ -16,9 +16,9 @@ exports.setupModels = async () => {
   Project.hasMany(DeploymentJob, { foreignKey: "ProjectId" });
   DeploymentJob.belongsTo(Project, { foreignKey: "ProjectId" });
 
-  await DockerInfo.sync({ alter: true });
-  await Project.sync({ alter: true });
-  await DeploymentJob.sync({ alter: true });
-  await GithubInstallation.sync({ alter: true });
-  await TerminalSession.sync({ alter: true });
+  // await DockerInfo.sync({ alter: true });
+  // await Project.sync({ alter: true });
+  // await DeploymentJob.sync({ alter: true });
+  // await GithubInstallation.sync({ alter: true });
+  // await TerminalSession.sync({ alter: true });
 };
