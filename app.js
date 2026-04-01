@@ -39,7 +39,7 @@ app.use(helmetMiddleware);
 // ── CORS: restrict to known origins (was: origin "*") ─────────────
 const ALLOWED_ORIGINS = (
   process.env.ALLOWED_ORIGINS ||
-  "http://localhost:3000,http://localhost:3001,http://localhost:5173"
+  "http://localhost:3000,http://localhost:3001,http://localhost:5173,https://devproject.sarthiq.com,https://sarthiq.com,https://project.sarthiq.com"
 )
   .split(",")
   .map((s) => s.trim())
@@ -61,7 +61,7 @@ app.use(
     req.rawBody = req.body; // Store raw Buffer for HMAC verification
     next();
   },
-  githubWebhookRouter
+  githubWebhookRouter,
 );
 
 // ── GitHub Setup URL redirect (non-API route) ─────────────────────
@@ -145,8 +145,12 @@ async function performInitialHealthChecks() {
   // 4. GitHub Credentials Check
   const missingGithubEnv = checkGithubCredentials();
   if (missingGithubEnv.length > 0) {
-    console.warn(`\n⚠️  [githubApp] WARNING: Missing GitHub configurations: ${missingGithubEnv.join(", ")}`);
-    console.warn("   GitHub integration features will be disabled until these are configured.\n");
+    console.warn(
+      `\n⚠️  [githubApp] WARNING: Missing GitHub configurations: ${missingGithubEnv.join(", ")}`,
+    );
+    console.warn(
+      "   GitHub integration features will be disabled until these are configured.\n",
+    );
   } else {
     console.log("  ✓ GitHub App credentials found");
   }
@@ -176,7 +180,10 @@ async function bootstrap() {
   try {
     await reconcileOnStartup();
   } catch (reconcileErr) {
-    console.error("[bootstrap] ⚠ Reconciler failed (non-fatal):", reconcileErr.message);
+    console.error(
+      "[bootstrap] ⚠ Reconciler failed (non-fatal):",
+      reconcileErr.message,
+    );
   }
 
   // ── Start BullMQ workers ──────────────────────────────────────
