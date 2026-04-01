@@ -4,6 +4,7 @@ const TierConfig = require("./Projects/tierConfig");
 const DeploymentJob = require("./Deployment/deploymentJob");
 const TerminalSession = require("./Deployment/terminalSession");
 const GithubInstallation = require("./Projects/githubInstallation");
+const GithubAccount = require("./Projects/githubAccount");
 // KubeNode is standalone (no FK associations needed)
 require("./Deployment/kubeNode");
 
