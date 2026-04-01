@@ -36,7 +36,7 @@ const { wakeQueue } = require("../Jobs/queues");
 const { getServiceClusterIP } = require("../Utils/kubeClient");
 const { escapeHtml } = require("../Utils/securityValidator");
 
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "sarthiq.com";
+const { PROJECT_DOMAIN } = require("./subdomainParser");
 const NAMESPACE = process.env.K8S_NAMESPACE || "sarthiq-apps";
 
 /* ── Redis client for wake-job deduplication keys ────────────────── */
@@ -196,6 +196,41 @@ const errorPage = (projectTitle, errorMsg) => {
 </html>`;
 };
 
+const notFoundPage = (subdomain) => {
+  const safeSub = escapeHtml(subdomain);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Not Found | SarthiQ</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{min-height:100vh;display:flex;align-items:center;justify-content:center;
+         background:#0a0a0f;font-family:'Inter',system-ui,sans-serif;color:#e4e4e7}
+    .card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+          border-radius:20px;padding:48px 56px;text-align:center;max-width:480px}
+    .icon{font-size:48px;margin-bottom:20px}
+    h1{font-size:22px;font-weight:700;margin-bottom:10px}
+    p{color:#71717a;font-size:14px;line-height:1.6;margin-bottom:12px}
+    code{background:rgba(124,58,237,.15);color:#a78bfa;padding:2px 8px;border-radius:6px;font-size:13px}
+    .logo{position:fixed;top:20px;left:20px;font-weight:800;
+          background:linear-gradient(135deg,#7c3aed,#a78bfa);
+          -webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:18px}
+  </style>
+</head>
+<body>
+  <div class="logo">SarthiQ</div>
+  <div class="card">
+    <div class="icon">🔍</div>
+    <h1>Project Not Found</h1>
+    <p>There is no project deployed at <code>${safeSub}.${PROJECT_DOMAIN}</code>.</p>
+    <p>If you just created this project, it may not have been deployed yet.</p>
+  </div>
+</body>
+</html>`;
+};
+
 /* ── Dynamic in-memory proxy cache ──────────────────────────────── */
 // Map<subdomain, proxyMiddleware>
 const proxyCache = new Map();
@@ -254,18 +289,11 @@ function getOrCreateProxy(subdomain) {
 
 /* ── Main middleware factory ────────────────────────────────────── */
 async function sleepProxyHandler(req, res, next) {
-  // Extract subdomain from Host header
-  const host = req.headers.host || "";
-  const subdomain = host.split(`.${BASE_DOMAIN}`)[0];
+  // Use subdomain parsed by subdomainParser middleware
+  const subdomain = req.subdomain;
 
-  // Skip if not a valid user subdomain (e.g. api.sarthiq.com, www.sarthiq.com)
-  if (
-    !subdomain ||
-    subdomain === "www" ||
-    subdomain === "api" ||
-    subdomain === "admin" ||
-    host === BASE_DOMAIN
-  ) {
+  // Skip if no user subdomain (root domain, reserved, or invalid)
+  if (!subdomain) {
     return next();
   }
 
@@ -276,8 +304,14 @@ async function sleepProxyHandler(req, res, next) {
   }).catch(() => null);
 
   if (!project) {
-    return res.status(404).send(`<h2>No project found at <code>${subdomain}.${BASE_DOMAIN}</code></h2>`);
+    console.log(`[subdomain] ❌ No project mapped for subdomain: ${subdomain}`);
+    return res.status(404).send(notFoundPage(subdomain));
   }
+
+  // Log the mapped service for observability
+  console.log(
+    `[subdomain] ✅ ${subdomain} → project "${project.title}" (id: ${project.id}, status: ${project.DockerInfo?.status || "no-docker"})`,
+  );
 
   const docker = project.DockerInfo;
   if (!docker) {

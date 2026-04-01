@@ -37,7 +37,7 @@ const INACTIVITY_TIMEOUT_MS =
 
 const INGRESS_NAMESPACE = "ingress-nginx";
 const INGRESS_SELECTOR = "app.kubernetes.io/component=controller";
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "localhost";
+const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
 
 /* ------------------------------------------------------------------ */
 /* Helper: Check NGINX Ingress access logs for recent traffic          */
@@ -89,14 +89,14 @@ async function getActiveSubdomainsFromIngressLogs(sinceMinutes = 20) {
           // Try to extract subdomain from the log line
           // NGINX ingress default log format:
           // <ip> - - [date] "request" status size "referer" "user-agent" <request_length> <request_time> [<upstream>] [<alt_upstream>] <response_length> <response_time> <status> <req_id>
-          // But the host can appear differently. Let's look for *.BASE_DOMAIN pattern
+          // But the host can appear differently. Let's look for *.PROJECT_DOMAIN pattern
 
-          const hostRegex = new RegExp(`([a-z0-9][a-z0-9-]+)\\.${BASE_DOMAIN.replace(/\./g, "\\.")}`, "gi");
+          const hostRegex = new RegExp(`([a-z0-9][a-z0-9-]+)\\.${PROJECT_DOMAIN.replace(/\./g, "\\.")}`, "gi");
           const matches = line.match(hostRegex);
 
           if (matches) {
             for (const fullHost of matches) {
-              const subdomain = fullHost.split(`.${BASE_DOMAIN}`)[0].toLowerCase();
+              const subdomain = fullHost.split(`.${PROJECT_DOMAIN}`)[0].toLowerCase();
               // Skip system subdomains
               if (subdomain === "www" || subdomain === "api" || subdomain === "admin") continue;
 

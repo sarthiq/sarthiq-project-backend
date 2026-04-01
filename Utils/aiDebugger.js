@@ -184,16 +184,23 @@ ${previousAttemptsText}
  * Collect pod error logs from Kubernetes.
  * Used when a pod fails readiness checks or enters CrashLoopBackOff.
  *
- * @param {string} podName
+ * Reuses the shared K8s client from kubeClient.js instead of creating
+ * a new KubeConfig on every call.
+ *
+ * @param {string} podName - deployment label (will be used as label selector)
  * @param {string} namespace
  * @returns {Promise<string>} logs text
  */
 async function collectPodLogs(podName, namespace = "sarthiq-apps") {
   try {
     const k8s = require("@kubernetes/client-node");
-    const kc = new k8s.KubeConfig();
-    kc.loadFromDefault();
-    const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
+    // Reuse singleton KubeConfig
+    if (!collectPodLogs._kc) {
+      collectPodLogs._kc = new k8s.KubeConfig();
+      collectPodLogs._kc.loadFromDefault();
+      collectPodLogs._coreV1 = collectPodLogs._kc.makeApiClient(k8s.CoreV1Api);
+    }
+    const coreV1 = collectPodLogs._coreV1;
 
     // List pods matching the deployment label
     const pods = await coreV1.listNamespacedPod({
@@ -209,13 +216,19 @@ async function collectPodLogs(podName, namespace = "sarthiq-apps") {
     const podRealName = pod.metadata.name;
 
     // Get logs
-    const logResponse = await coreV1.readNamespacedPodLog({
-      name: podRealName,
-      namespace,
-      tailLines: 100,
-    });
+    let logText = "";
+    try {
+      const logResponse = await coreV1.readNamespacedPodLog({
+        name: podRealName,
+        namespace,
+        tailLines: 100,
+      });
+      logText = typeof logResponse === "string" ? logResponse : (logResponse?.body || "");
+    } catch (logErr) {
+      logText = `(Could not retrieve container logs: ${logErr.message})`;
+    }
 
-    // Also check pod events for OOMKilled, CrashLoopBackOff, etc.
+    // Check pod events for OOMKilled, CrashLoopBackOff, etc.
     const status = pod.status;
     const containerStatuses = status?.containerStatuses || [];
     const eventInfo = containerStatuses
@@ -229,7 +242,17 @@ async function collectPodLogs(podName, namespace = "sarthiq-apps") {
       .filter(Boolean)
       .join("\n");
 
-    return `--- Pod Events ---\n${eventInfo || "No events"}\n\n--- Container Logs ---\n${logResponse || "No logs available"}`;
+    // Also get pod conditions for scheduling info
+    const conditions = (status?.conditions || [])
+      .map((c) => `${c.type}: ${c.status} — ${c.message || c.reason || ""}`)
+      .join("\n");
+
+    return (
+      `--- Pod Phase: ${status?.phase || "Unknown"} ---\n` +
+      `--- Pod Conditions ---\n${conditions || "None"}\n\n` +
+      `--- Container Status ---\n${eventInfo || "No events"}\n\n` +
+      `--- Container Logs ---\n${logText || "No logs available"}`
+    );
   } catch (err) {
     return `Failed to collect pod logs: ${err.message}`;
   }

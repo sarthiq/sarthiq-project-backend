@@ -256,6 +256,66 @@ async function getInstallationInfo(installationId) {
 }
 
 /**
+ * Delete a GitHub App installation via the API.
+ * This fully removes the app from the user's GitHub account,
+ * so the next "Connect GitHub" triggers a fresh install flow with redirect.
+ * @param {number} installationId
+ * @returns {Promise<boolean>} true if deleted successfully
+ */
+async function deleteInstallation(installationId) {
+  try {
+    const appJwt = await getAppJwt();
+    const octokit = new Octokit({ auth: appJwt });
+
+    await octokit.request(
+      "DELETE /app/installations/{installation_id}",
+      {
+        installation_id: installationId,
+      }
+    );
+
+    console.log(`[githubApp] ✅ Deleted installation ${installationId} from GitHub`);
+    return true;
+  } catch (err) {
+    console.error(`[githubApp] Failed to delete installation ${installationId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * List ALL installations of this GitHub App.
+ * Used to find installations that exist on GitHub but aren't saved in our DB.
+ * @returns {Promise<Array>} List of installation objects
+ */
+async function listAllInstallations() {
+  try {
+    const appJwt = await getAppJwt();
+    const octokit = new Octokit({ auth: appJwt });
+
+    const installations = [];
+    let page = 1;
+
+    // Paginate to get all installations
+    while (true) {
+      const { data } = await octokit.request("GET /app/installations", {
+        per_page: 100,
+        page,
+      });
+
+      installations.push(...data);
+
+      if (data.length < 100) break;
+      page++;
+    }
+
+    return installations;
+  } catch (err) {
+    console.error("[githubApp] Failed to list installations:", err.message);
+    return [];
+  }
+}
+
+/**
  * Check if the necessary GitHub credentials are provided in the environment.
  * @returns {Array} List of missing credentials
  */
@@ -288,5 +348,8 @@ module.exports = {
   generateCloneToken,
   verifyWebhookSignature,
   getInstallationInfo,
+  deleteInstallation,
+  listAllInstallations,
   checkGithubCredentials,
 };
+
