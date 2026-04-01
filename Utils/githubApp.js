@@ -283,6 +283,39 @@ async function deleteInstallation(installationId) {
 }
 
 /**
+ * List ALL installations of this GitHub App.
+ * Used to find installations that exist on GitHub but aren't saved in our DB.
+ * @returns {Promise<Array>} List of installation objects
+ */
+async function listAllInstallations() {
+  try {
+    const appJwt = await getAppJwt();
+    const octokit = new Octokit({ auth: appJwt });
+
+    const installations = [];
+    let page = 1;
+
+    // Paginate to get all installations
+    while (true) {
+      const { data } = await octokit.request("GET /app/installations", {
+        per_page: 100,
+        page,
+      });
+
+      installations.push(...data);
+
+      if (data.length < 100) break;
+      page++;
+    }
+
+    return installations;
+  } catch (err) {
+    console.error("[githubApp] Failed to list installations:", err.message);
+    return [];
+  }
+}
+
+/**
  * Check if the necessary GitHub credentials are provided in the environment.
  * @returns {Array} List of missing credentials
  */
@@ -316,5 +349,7 @@ module.exports = {
   verifyWebhookSignature,
   getInstallationInfo,
   deleteInstallation,
+  listAllInstallations,
   checkGithubCredentials,
 };
+
