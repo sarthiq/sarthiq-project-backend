@@ -59,7 +59,7 @@ const { resolveExecutionMode, detectSuspiciousActivity } = require("../Utils/san
 
 const isProd = process.env.NODE_ENV === "production";
 const REGISTRY = process.env.DOCKER_REGISTRY || (isProd ? "registry.sarthiq.com" : "");
-const BASE_DOMAIN = process.env.BASE_DOMAIN || (isProd ? "sarthiq.com" : "localhost");
+const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
 const MAX_AI_RETRIES = Math.min(parseInt(process.env.MAX_AI_RETRIES || "3"), 5); // Cap at 5
 
 /* ------------------------------------------------------------------ */
@@ -188,7 +188,7 @@ const deployWorker = new Worker(
         project.subdomain = sub;
         await project.save();
       }
-      await appendLog(jobRecord, `  → Subdomain: ${project.subdomain}.${BASE_DOMAIN}`);
+      await appendLog(jobRecord, `  → Subdomain: ${project.subdomain}.${PROJECT_DOMAIN}`);
 
       /* ── STEP 3: Clone repository (SECURE — via spawn) ────────────── */
       await appendLog(jobRecord, "Step 2/9: Cloning repository...");
@@ -533,7 +533,7 @@ const deployWorker = new Worker(
       const publicHost = await createIngress({
         name: deployName,
         subdomain: project.subdomain,
-        baseDomain: BASE_DOMAIN,
+        baseDomain: PROJECT_DOMAIN,
       });
       await appendLog(jobRecord, `  → Ingress created: ${publicHost}`);
 

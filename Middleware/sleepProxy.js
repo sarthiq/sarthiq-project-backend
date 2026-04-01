@@ -36,7 +36,7 @@ const { wakeQueue } = require("../Jobs/queues");
 const { getServiceClusterIP } = require("../Utils/kubeClient");
 const { escapeHtml } = require("../Utils/securityValidator");
 
-const { BASE_DOMAIN } = require("./subdomainParser");
+const { PROJECT_DOMAIN } = require("./subdomainParser");
 const NAMESPACE = process.env.K8S_NAMESPACE || "sarthiq-apps";
 
 /* ── Redis client for wake-job deduplication keys ────────────────── */
@@ -224,7 +224,7 @@ const notFoundPage = (subdomain) => {
   <div class="card">
     <div class="icon">🔍</div>
     <h1>Project Not Found</h1>
-    <p>There is no project deployed at <code>${safeSub}.${BASE_DOMAIN}</code>.</p>
+    <p>There is no project deployed at <code>${safeSub}.${PROJECT_DOMAIN}</code>.</p>
     <p>If you just created this project, it may not have been deployed yet.</p>
   </div>
 </body>

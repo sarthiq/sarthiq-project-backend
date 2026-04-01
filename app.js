@@ -4,7 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { activityLogger } = require("./Middleware/activityLogger");
-const { subdomainParser, BASE_DOMAIN } = require("./Middleware/subdomainParser");
+const { subdomainParser, PROJECT_DOMAIN } = require("./Middleware/subdomainParser");
 const {
   sleepProxyHandler,
   router: proxyRouter,
@@ -301,8 +301,9 @@ async function bootstrap() {
 
       server.listen(port);
       console.log(`Listening to the port : ${port}`);
-      console.log(`Base domain: ${BASE_DOMAIN}`);
-      console.log(`Subdomain routing: *.<${BASE_DOMAIN}> → project proxy`);
+      console.log(`Project domain: ${PROJECT_DOMAIN}`);
+      console.log(`Subdomain routing: *.${PROJECT_DOMAIN} → student project proxy`);
+      console.log(`Platform domain: sarthiq.com → passes through to API routes`);
       console.log(
         `GraphQL endpoint available at http://localhost:${port}/graphql`,
       );

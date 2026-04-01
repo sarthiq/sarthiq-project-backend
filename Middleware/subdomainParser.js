@@ -3,26 +3,38 @@
  * ─────────────────────────────────────────────────────────────────────
  * Middleware for subdomain extraction, validation, and logging.
  *
- * Parses the Host header to extract the subdomain identifier used for
- * dynamic project routing (e.g., user1.sarthiq.in → subdomain = "user1").
- *
- * Supports:
- *   - Production:  <sub>.sarthiq.in
- *   - Development:  <sub>.localhost, or curl -H "Host: <sub>.sarthiq.in" localhost:3737
+ * IMPORTANT DOMAIN SEPARATION:
+ *   - *.sarthiq.com  → Platform itself (devproject, project, devprojectapi, etc.)
+ *                       These are NEVER treated as student projects.
+ *   - *.sarthiq.in   → Student deployed projects ONLY
+ *                       These ARE routed through the subdomain proxy.
+ *   - *.localhost     → Local development (treated like sarthiq.in)
  *
  * Sets `req.subdomain` to:
  *   - A lowercase, validated string  (e.g. "my-project-42")
- *   - null  when the request targets the root domain or a reserved subdomain
+ *   - null  when the request targets the platform or root domain
  *
  * Rejects requests with malformed subdomains (non [a-z0-9-]) with 400.
  * ─────────────────────────────────────────────────────────────────────
  */
 
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "sarthiq.in";
+/**
+ * PROJECT_DOMAIN: The domain where student projects are deployed.
+ * Only subdomains of THIS domain are treated as project routes.
+ * e.g., user1.sarthiq.in → routes to user1's deployed container
+ */
+const PROJECT_DOMAIN = process.env.PROJECT_DOMAIN || "sarthiq.in";
 
 /**
- * Reserved subdomains that should never be treated as user projects.
- * Requests to these pass through to the standard API routes.
+ * PLATFORM_DOMAIN: The domain where the SarthiQ platform lives.
+ * Subdomains here (devproject, project, devprojectapi, etc.) are
+ * NEVER treated as student projects — they pass through to API routes.
+ */
+const PLATFORM_DOMAIN = "sarthiq.com";
+
+/**
+ * Reserved subdomains that should never be treated as user projects
+ * even on sarthiq.in. Requests to these pass through to standard API routes.
  */
 const RESERVED_SUBDOMAINS = new Set([
   "www",
@@ -40,6 +52,8 @@ const RESERVED_SUBDOMAINS = new Set([
   "app",
   "project",
   "devproject",
+  "devprojectapi",
+  "projectapi",
 ]);
 
 /**
@@ -51,8 +65,11 @@ const SUBDOMAIN_REGEX = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
  * Extract subdomain from the Host header.
+ * ONLY parses subdomains from PROJECT_DOMAIN (sarthiq.in) and localhost.
+ * Requests to PLATFORM_DOMAIN (sarthiq.com) always return null.
+ *
  * @param {string} host - Raw Host header value (may include port)
- * @returns {string|null} - The subdomain, or null if root/reserved
+ * @returns {string|null} - The subdomain, or null if root/platform/reserved
  */
 function extractSubdomain(host) {
   if (!host) return null;
@@ -60,16 +77,21 @@ function extractSubdomain(host) {
   // Strip port (handles localhost:3737, user1.sarthiq.in:443, etc.)
   const hostname = host.split(":")[0].toLowerCase().trim();
 
+  // ── PLATFORM DOMAIN: Always pass through, NEVER treat as student project ──
+  if (hostname === PLATFORM_DOMAIN || hostname.endsWith(`.${PLATFORM_DOMAIN}`)) {
+    return null;
+  }
+
   // Skip bare root domains
-  if (hostname === BASE_DOMAIN || hostname === "localhost" || hostname === "127.0.0.1") {
+  if (hostname === PROJECT_DOMAIN || hostname === "localhost" || hostname === "127.0.0.1") {
     return null;
   }
 
   let subdomain = null;
 
-  // Production / curl override: <sub>.<BASE_DOMAIN>
-  if (hostname.endsWith(`.${BASE_DOMAIN}`)) {
-    subdomain = hostname.slice(0, -(BASE_DOMAIN.length + 1)); // strip ".sarthiq.in"
+  // Student project domain: <sub>.sarthiq.in
+  if (hostname.endsWith(`.${PROJECT_DOMAIN}`)) {
+    subdomain = hostname.slice(0, -(PROJECT_DOMAIN.length + 1));
   }
   // Localhost development: <sub>.localhost
   else if (hostname.endsWith(".localhost")) {
@@ -90,7 +112,7 @@ function extractSubdomain(host) {
  * Express middleware: parses subdomain from Host header.
  *
  * – Sets `req.subdomain` (string | null)
- * – Returns 400 for malformed subdomains
+ * – Returns 400 for malformed subdomains on PROJECT_DOMAIN
  * – Logs subdomain + URL for observability
  */
 function subdomainParser(req, res, next) {
@@ -127,5 +149,6 @@ module.exports = {
   extractSubdomain,
   RESERVED_SUBDOMAINS,
   SUBDOMAIN_REGEX,
-  BASE_DOMAIN,
+  PROJECT_DOMAIN,
+  PLATFORM_DOMAIN,
 };
