@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { activityLogger } = require("./Middleware/activityLogger");
+const { subdomainParser, BASE_DOMAIN } = require("./Middleware/subdomainParser");
 const {
   sleepProxyHandler,
   router: proxyRouter,
@@ -36,8 +37,8 @@ app.set("trust proxy", 1);
 // ── Security headers (Helmet) ─────────────────────────────────────
 app.use(helmetMiddleware);
 
-// ── CORS: restrict to known origins (was: origin "*") ─────────────
-const ALLOWED_ORIGINS = (
+// ── CORS: support wildcard subdomains + known origins ─────────────
+const STATIC_ORIGINS = (
   process.env.ALLOWED_ORIGINS ||
   "http://localhost:3000,http://localhost:3001,http://localhost:5173,https://devproject.sarthiq.com,https://sarthiq.com,https://project.sarthiq.com"
 )
@@ -45,13 +46,39 @@ const ALLOWED_ORIGINS = (
   .map((s) => s.trim())
   .filter(Boolean);
 
+// Regex patterns for wildcard subdomain matching
+const WILDCARD_ORIGINS = [
+  /\.sarthiq\.in$/,   // *.sarthiq.in
+  /\.sarthiq\.com$/,  // *.sarthiq.com
+  /\.localhost(:\d+)?$/, // *.localhost / *.localhost:PORT (dev)
+];
+
+/**
+ * CORS origin checker — supports both static list and wildcard regex.
+ * Used by both the main CORS middleware and GraphQL CORS.
+ */
+function isOriginAllowed(origin) {
+  if (!origin) return true; // Same-origin / server-to-server
+  if (STATIC_ORIGINS.includes(origin)) return true;
+  return WILDCARD_ORIGINS.some((re) => re.test(origin));
+}
+
 app.use(
   cors({
-    origin: "*",
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS policy: Origin ${origin} not allowed`));
+      }
+    },
     methods: ["GET", "POST", "DELETE"],
     credentials: true,
   }),
 );
+
+// ── Subdomain Parser (EARLY — before body parsers & routes) ───────
+app.use(subdomainParser);
 
 // ── GitHub Webhook (MUST be before bodyParser to preserve raw body) ─
 app.use(
@@ -96,6 +123,17 @@ app.use((err, req, res, next) => {
 });
 
 app.use(activityLogger);
+
+// ── Route Bypass: subdomain requests go straight to sleepProxy ────
+// This prevents SarthiQ API routes from intercepting the deployed
+// project's own routes (e.g., project has /admin, /user, /api/github).
+app.use((req, res, next) => {
+  if (req.subdomain) {
+    // Skip all API routes — hand off to sleepProxyHandler mounted below
+    return sleepProxyHandler(req, res, next);
+  }
+  next();
+});
 
 app.use("/", infoRoutes);
 
@@ -209,7 +247,7 @@ async function bootstrap() {
     "/graphql",
     cors({
       origin: (origin, callback) => {
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        if (isOriginAllowed(origin)) {
           callback(null, true);
         } else {
           callback(new Error("CORS policy: Origin not allowed"));
@@ -246,7 +284,9 @@ async function bootstrap() {
   // ── Mount sleep proxy wake-status REST route ────────────────
   app.use("/api/proxy", proxyRouter);
 
-  // ── Wildcard subdomain sleep proxy (LAST middleware) ─────────
+  // ── Wildcard subdomain sleep proxy (LAST middleware, fallback) ──
+  // NOTE: Subdomain requests are primarily intercepted by the route
+  // bypass above. This is a safety net for edge cases.
   app.use(sleepProxyHandler);
 
   db.sync()
@@ -261,6 +301,8 @@ async function bootstrap() {
 
       server.listen(port);
       console.log(`Listening to the port : ${port}`);
+      console.log(`Base domain: ${BASE_DOMAIN}`);
+      console.log(`Subdomain routing: *.<${BASE_DOMAIN}> → project proxy`);
       console.log(
         `GraphQL endpoint available at http://localhost:${port}/graphql`,
       );
