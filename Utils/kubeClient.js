@@ -1,9 +1,21 @@
 /**
  * kubeClient.js
+ * ─────────────────────────────────────────────────────────────────────
  * Wrapper around @kubernetes/client-node.
  * Reads kubeconfig from:
  *   - KUBECONFIG env var, OR
  *   - In-cluster service account (when running inside K8s)
+ *
+ * KEY CHANGES (v2):
+ *   - REMOVED nodeSelector from deployment spec (let K8s scheduler decide)
+ *   - Added tolerations for single-node control-plane clusters
+ *   - Fixed security contexts: permissive-by-default, enforce when safe
+ *   - Added startupProbe for slow-starting containers
+ *   - Tuned liveness/readiness probe timings
+ *   - Completely rewrote waitForReady() with diagnostic pod status checks
+ *   - Fixed createService() to accept namespace parameter
+ *   - Implemented enforceResourceCap() properly
+ * ─────────────────────────────────────────────────────────────────────
  */
 const k8s = require("@kubernetes/client-node");
 
@@ -45,6 +57,57 @@ const MAX_MEMORY_LIMIT = process.env.MAX_MEMORY_LIMIT || "1024Mi";
 /* ------------------------------------------------------------------ */
 function safeLabel(name) {
   return name.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 52);
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper: parse resource values to numeric for comparison               */
+/* ------------------------------------------------------------------ */
+function parseCpuToMillicores(cpu) {
+  if (!cpu) return 0;
+  const str = String(cpu);
+  if (str.endsWith("m")) return parseInt(str);
+  if (str.endsWith("n")) return Math.round(parseInt(str) / 1_000_000);
+  return Math.round(parseFloat(str) * 1000);
+}
+
+function parseMemoryToMi(mem) {
+  if (!mem) return 0;
+  const str = String(mem);
+  if (str.endsWith("Ki")) return Math.round(parseInt(str) / 1024);
+  if (str.endsWith("Mi")) return parseInt(str);
+  if (str.endsWith("Gi")) return parseInt(str) * 1024;
+  if (str.endsWith("Ti")) return parseInt(str) * 1024 * 1024;
+  return Math.round(parseInt(str) / (1024 * 1024));
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper: enforce resource caps (actually clamp values now)             */
+/* ------------------------------------------------------------------ */
+function enforceResourceCap(requested, max, type) {
+  if (!requested) return max;
+  if (type === "cpu") {
+    const reqMilli = parseCpuToMillicores(requested);
+    const maxMilli = parseCpuToMillicores(max);
+    if (reqMilli > maxMilli) {
+      console.log(
+        `[kubeClient] Capping CPU: ${requested} → ${max} (exceeds max)`
+      );
+      return max;
+    }
+    return requested;
+  }
+  if (type === "memory") {
+    const reqMi = parseMemoryToMi(requested);
+    const maxMi = parseMemoryToMi(max);
+    if (reqMi > maxMi) {
+      console.log(
+        `[kubeClient] Capping Memory: ${requested} → ${max} (exceeds max)`
+      );
+      return max;
+    }
+    return requested;
+  }
+  return requested;
 }
 
 /* ------------------------------------------------------------------ */
@@ -95,9 +158,9 @@ async function createDeployment({
   cpuRequest,
   memoryRequest,
   envVars = {},
-  nodeName,
+  nodeName, // kept for DB tracking but NO LONGER used for nodeSelector
   useConfigMap = false,
-  // ── NEW: Security configuration from sandboxManager ──
+  // ── Security configuration from sandboxManager ──
   executionMode = "secure",
   podSecurityContext = null,
   containerSecurityContext = null,
@@ -105,6 +168,8 @@ async function createDeployment({
   labels = {},
   namespace = null,
   activeDeadlineSeconds = null,
+  // ── NEW: cluster info for tolerations ──
+  isSingleNodeCluster = false,
 }) {
   const label = safeLabel(name);
   const targetNamespace = namespace || NAMESPACE;
@@ -132,12 +197,12 @@ async function createDeployment({
     };
   }
 
-  // Default secure security contexts if not provided
+  // ── Security contexts ──
+  // Permissive-by-default: let the Dockerfile's USER instruction govern.
+  // Only enforce strict non-root when executionMode is "sandbox" with explicit config.
   const defaultPodSecurity = podSecurityContext || {
-    runAsNonRoot: true,
-    runAsUser: 1000,
-    runAsGroup: 1000,
-    fsGroup: 1000,
+    // runAsNonRoot: false — most AI-generated Dockerfiles run as root
+    // The Dockerfile can set USER 1000 and that will be respected
     seccompProfile: { type: "RuntimeDefault" },
   };
 
@@ -145,8 +210,26 @@ async function createDeployment({
     allowPrivilegeEscalation: false,
     readOnlyRootFilesystem: false,
     capabilities: { drop: ["ALL"] },
-    seccompProfile: { type: "RuntimeDefault" },
   };
+
+  // ── Tolerations for single-node control-plane clusters ──
+  // In Minikube/Kind/single-node clusters, the only node has a
+  // NoSchedule taint. We MUST tolerate it or pods stay Pending forever.
+  const tolerations = [];
+  if (isSingleNodeCluster) {
+    tolerations.push(
+      {
+        key: "node-role.kubernetes.io/control-plane",
+        operator: "Exists",
+        effect: "NoSchedule",
+      },
+      {
+        key: "node-role.kubernetes.io/master",
+        operator: "Exists",
+        effect: "NoSchedule",
+      }
+    );
+  }
 
   const deployment = {
     apiVersion: "apps/v1",
@@ -172,15 +255,17 @@ async function createDeployment({
           },
         },
         spec: {
-          // Pin to specific node if applicable
-          ...(nodeName && nodeName !== "minikube-local" && nodeName !== "docker-desktop" && {
-            nodeSelector: { "kubernetes.io/hostname": nodeName },
-          }),
+          // ── NO nodeSelector: let K8s scheduler handle placement ──
+          // Previously used nodeSelector with hardcoded/fake node names.
+          // The scheduler will find the best node automatically.
+
+          // Tolerations for single-node/control-plane clusters
+          ...(tolerations.length > 0 && { tolerations }),
 
           // RuntimeClass for sandbox mode (gvisor/kata)
           ...(runtimeClassName && { runtimeClassName }),
 
-          // Pod-level security context (hardened)
+          // Pod-level security context
           securityContext: defaultPodSecurity,
 
           // Auto-destroy for sandbox mode
@@ -196,7 +281,7 @@ async function createDeployment({
               ports: [{ containerPort }],
               ...envConfig,
 
-              // Container-level security context (hardened)
+              // Container-level security context
               securityContext: defaultContainerSecurity,
 
               resources: {
@@ -204,19 +289,32 @@ async function createDeployment({
                 requests: { cpu: cpuRequest, memory: memoryRequest },
               },
 
-              // Liveness probe
+              // ── Startup probe: handles slow-starting containers ──
+              // K8s will wait up to 300s (5 min) for the app to start.
+              // During this time, liveness and readiness probes are disabled.
+              startupProbe: {
+                tcpSocket: { port: containerPort },
+                initialDelaySeconds: 5,
+                periodSeconds: 5,
+                failureThreshold: 60, // 60 * 5s = 300s max startup time
+              },
+
+              // ── Liveness probe: restarts the container if unhealthy ──
+              // Only runs AFTER startupProbe succeeds
               livenessProbe: {
                 tcpSocket: { port: containerPort },
-                initialDelaySeconds: 30,
                 periodSeconds: 15,
                 failureThreshold: 3,
+                timeoutSeconds: 3,
               },
-              // Readiness probe
+
+              // ── Readiness probe: controls traffic routing ──
+              // Only runs AFTER startupProbe succeeds
               readinessProbe: {
                 tcpSocket: { port: containerPort },
-                initialDelaySeconds: 10,
                 periodSeconds: 5,
                 failureThreshold: 3,
+                timeoutSeconds: 3,
               },
             },
           ],
@@ -228,8 +326,6 @@ async function createDeployment({
       },
     },
   };
-
-  // Namespace already ensured at the top of createDeployment()
 
   const existing = await appsV1
     .readNamespacedDeployment({ name: label, namespace: targetNamespace })
@@ -255,15 +351,16 @@ async function createDeployment({
 /* ------------------------------------------------------------------ */
 /* CREATE: ClusterIP Service                                            */
 /* ------------------------------------------------------------------ */
-async function createService({ name, containerPort }) {
+async function createService({ name, containerPort, namespace = null }) {
   const label = safeLabel(name);
+  const targetNamespace = namespace || NAMESPACE;
 
   const svc = {
     apiVersion: "v1",
     kind: "Service",
     metadata: {
       name: label,
-      namespace: NAMESPACE,
+      namespace: targetNamespace,
       labels: { app: label, "managed-by": "sarthiq" },
     },
     spec: {
@@ -274,16 +371,16 @@ async function createService({ name, containerPort }) {
   };
 
   const existing = await coreV1
-    .readNamespacedService({ name: label, namespace: NAMESPACE })
+    .readNamespacedService({ name: label, namespace: targetNamespace })
     .catch(() => null);
 
   if (existing) {
-    await coreV1.replaceNamespacedService({ name: label, namespace: NAMESPACE, body: svc });
+    await coreV1.replaceNamespacedService({ name: label, namespace: targetNamespace, body: svc });
   } else {
-    await coreV1.createNamespacedService({ namespace: NAMESPACE, body: svc });
+    await coreV1.createNamespacedService({ namespace: targetNamespace, body: svc });
   }
 
-  return `${label}.${NAMESPACE}.svc.cluster.local`;
+  return `${label}.${targetNamespace}.svc.cluster.local`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -433,25 +530,265 @@ async function scaleDeployment(name, replicas) {
 }
 
 /* ------------------------------------------------------------------ */
-/* WAIT: until deployment has ≥1 ready pod (with timeout)              */
+/* WAIT: until deployment has ≥1 ready pod (with FULL DIAGNOSTICS)     */
 /* ------------------------------------------------------------------ */
-async function waitForReady(name, timeoutMs = 180_000) {
-  const label = safeLabel(name);
-  const start = Date.now();
 
-  while (Date.now() - start < timeoutMs) {
-    const dep = await appsV1
-      .readNamespacedDeployment({ name: label, namespace: NAMESPACE })
-      .catch(() => null);
+/**
+ * Diagnose why a pod is not ready by examining its status, events, and logs.
+ * Returns structured diagnostic info.
+ */
+async function diagnosePodFailure(label, targetNamespace) {
+  const diagnostic = {
+    phase: "Unknown",
+    reason: "Unknown failure",
+    details: "",
+    containerLogs: "",
+    events: [],
+    isSchedulingIssue: false,
+    isImageIssue: false,
+    isAppCrash: false,
+    isResourceIssue: false,
+  };
 
-    if (dep && dep.status?.readyReplicas >= 1) return true;
+  try {
+    // Get pods matching the deployment
+    const podList = await coreV1.listNamespacedPod({
+      namespace: targetNamespace,
+      labelSelector: `app=${label}`,
+    });
 
-    await new Promise((r) => setTimeout(r, 3000));
+    const pods = podList.items || [];
+    if (pods.length === 0) {
+      diagnostic.reason = "No pods created by the deployment. Check deployment spec.";
+      diagnostic.isSchedulingIssue = true;
+      return diagnostic;
+    }
+
+    const pod = pods[0]; // Most recent pod
+    const podName = pod.metadata.name;
+    const phase = pod.status?.phase || "Unknown";
+    diagnostic.phase = phase;
+
+    // ── Check conditions for scheduling issues ──
+    const conditions = pod.status?.conditions || [];
+    const podScheduled = conditions.find((c) => c.type === "PodScheduled");
+    if (podScheduled?.status === "False") {
+      diagnostic.reason = `Pod cannot be scheduled: ${podScheduled.message || podScheduled.reason}`;
+      diagnostic.details = podScheduled.message || "";
+      diagnostic.isSchedulingIssue = true;
+
+      // Common scheduling failure reasons
+      if (diagnostic.details.includes("Insufficient")) {
+        diagnostic.isResourceIssue = true;
+        diagnostic.reason =
+          "Node has insufficient resources (CPU/Memory). " +
+          "Reduce resource requests or add more nodes.";
+      } else if (
+        diagnostic.details.includes("didn't match") ||
+        diagnostic.details.includes("taints")
+      ) {
+        diagnostic.reason =
+          "No node matches scheduling constraints. " +
+          "Check node taints, tolerations, and nodeSelector. " +
+          `Details: ${diagnostic.details}`;
+      }
+      return diagnostic;
+    }
+
+    // ── Check container statuses ──
+    const containerStatuses = pod.status?.containerStatuses || [];
+    const initContainerStatuses = pod.status?.initContainerStatuses || [];
+
+    // Check init containers first
+    for (const cs of initContainerStatuses) {
+      const waiting = cs.state?.waiting;
+      if (waiting) {
+        diagnostic.reason = `Init container '${cs.name}' waiting: ${waiting.reason} — ${waiting.message || ""}`;
+        return diagnostic;
+      }
+    }
+
+    for (const cs of containerStatuses) {
+      const waiting = cs.state?.waiting;
+      const terminated = cs.state?.terminated;
+
+      if (waiting) {
+        const reason = waiting.reason || "Unknown";
+
+        if (reason === "CrashLoopBackOff") {
+          diagnostic.isAppCrash = true;
+          diagnostic.reason =
+            "Container keeps crashing (CrashLoopBackOff). " +
+            "The application is failing to start. Check container logs below.";
+        } else if (reason === "ImagePullBackOff" || reason === "ErrImagePull") {
+          diagnostic.isImageIssue = true;
+          diagnostic.reason =
+            `Cannot pull Docker image: ${waiting.message || "image not found or registry auth failed"}. ` +
+            "Verify the image exists and registry credentials are configured.";
+        } else if (reason === "CreateContainerConfigError") {
+          diagnostic.reason = `Container config error: ${waiting.message || "check env vars and volume mounts"}`;
+        } else if (reason === "RunContainerError") {
+          diagnostic.isAppCrash = true;
+          diagnostic.reason = `Container failed to start: ${waiting.message || reason}`;
+        } else {
+          diagnostic.reason = `Container waiting: ${reason} — ${waiting.message || ""}`;
+        }
+      }
+
+      if (terminated) {
+        diagnostic.isAppCrash = true;
+        if (terminated.reason === "OOMKilled") {
+          diagnostic.isResourceIssue = true;
+          diagnostic.reason =
+            "Container killed due to Out Of Memory (OOMKilled). " +
+            "Increase the memory limit or reduce memory usage.";
+        } else {
+          diagnostic.reason =
+            `Container terminated: ${terminated.reason || "unknown"} ` +
+            `(exit code ${terminated.exitCode}). ${terminated.message || ""}`;
+        }
+      }
+    }
+
+    // ── Collect container logs ──
+    try {
+      const logResp = await coreV1.readNamespacedPodLog({
+        name: podName,
+        namespace: targetNamespace,
+        tailLines: 50,
+      });
+      diagnostic.containerLogs =
+        typeof logResp === "string" ? logResp : logResp?.body || "";
+    } catch (logErr) {
+      diagnostic.containerLogs = `(Could not retrieve logs: ${logErr.message})`;
+    }
+
+    // ── Collect pod events ──
+    try {
+      const eventList = await coreV1.listNamespacedEvent({
+        namespace: targetNamespace,
+        fieldSelector: `involvedObject.name=${podName}`,
+      });
+      diagnostic.events = (eventList.items || [])
+        .slice(-10) // last 10 events
+        .map(
+          (e) =>
+            `[${e.type}] ${e.reason}: ${e.message} (${e.lastTimestamp || e.eventTime || ""})`
+        );
+    } catch {
+      // Non-fatal
+    }
+
+    // If we still don't have a specific reason, provide a generic one with logs
+    if (diagnostic.reason === "Unknown failure" && phase === "Pending") {
+      diagnostic.reason =
+        "Pod is stuck in Pending state. This usually means the scheduler " +
+        "cannot find a suitable node. Check node availability and resources.";
+      diagnostic.isSchedulingIssue = true;
+    }
+  } catch (err) {
+    diagnostic.reason = `Failed to diagnose pod: ${err.message}`;
   }
 
-  throw new Error(
-    `Deployment ${label} did not become ready within ${timeoutMs / 1000}s`
+  return diagnostic;
+}
+
+/**
+ * Wait for a deployment to have at least 1 ready pod.
+ * Unlike the old version, this provides detailed diagnostics on failure
+ * and detects unrecoverable conditions early.
+ *
+ * @param {string} name - deployment name (will be safeLabel'd)
+ * @param {number} timeoutMs - max wait time (default 180s)
+ * @param {string} namespace - target namespace (default: NAMESPACE)
+ * @returns {Promise<true>}
+ * @throws {Error} with diagnostic details
+ */
+async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
+  const label = safeLabel(name);
+  const targetNamespace = namespace || NAMESPACE;
+  const start = Date.now();
+  const pollInterval = 3000; // 3 seconds
+  let lastDiagnostic = null;
+  let earlyExitChecked = false;
+
+  while (Date.now() - start < timeoutMs) {
+    // Check deployment status
+    const dep = await appsV1
+      .readNamespacedDeployment({ name: label, namespace: targetNamespace })
+      .catch(() => null);
+
+    if (dep && dep.status?.readyReplicas >= 1) {
+      return true; // ✅ Pod is ready!
+    }
+
+    // ── Early exit: detect unrecoverable failures ──
+    // Only check after the first 15s (give the scheduler time to work)
+    const elapsed = Date.now() - start;
+    if (elapsed > 15_000) {
+      const diagnostic = await diagnosePodFailure(label, targetNamespace);
+      lastDiagnostic = diagnostic;
+
+      // Immediate failures — no point waiting the full timeout
+      if (diagnostic.isImageIssue) {
+        // ImagePullBackOff won't resolve itself
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      if (diagnostic.isAppCrash && elapsed > 30_000) {
+        // CrashLoopBackOff — app keeps crashing, waiting won't help
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}\n` +
+            `Container logs:\n${diagnostic.containerLogs || "(no logs)"}`
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      if (diagnostic.isResourceIssue && diagnostic.phase === "Pending" && elapsed > 30_000) {
+        // Resource issues on Pending — no node can accommodate this pod
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      // Log progress every 30 seconds
+      if (!earlyExitChecked || elapsed % 30_000 < pollInterval) {
+        console.log(
+          `[kubeClient] waitForReady: ${label} — phase: ${diagnostic.phase}, ` +
+            `reason: ${diagnostic.reason.slice(0, 100)}, ` +
+            `elapsed: ${Math.round(elapsed / 1000)}s`
+        );
+        earlyExitChecked = true;
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+
+  // ── Timeout reached — collect final diagnostic ──
+  const finalDiagnostic =
+    lastDiagnostic || (await diagnosePodFailure(label, targetNamespace));
+
+  const err = new Error(
+    `Deployment ${label} did not become ready within ${timeoutMs / 1000}s.\n` +
+      `Reason: ${finalDiagnostic.reason}\n` +
+      `Phase: ${finalDiagnostic.phase}\n` +
+      (finalDiagnostic.containerLogs
+        ? `Container logs:\n${finalDiagnostic.containerLogs.slice(0, 500)}\n`
+        : "") +
+      (finalDiagnostic.events.length > 0
+        ? `Pod events:\n${finalDiagnostic.events.join("\n")}\n`
+        : "")
   );
+  err.diagnostic = finalDiagnostic;
+  throw err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -523,16 +860,6 @@ async function createOrUpdateNetworkPolicy(policy) {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* Helper: enforce resource caps                                        */
-/* ------------------------------------------------------------------ */
-function enforceResourceCap(requested, max, type) {
-  // Simple enforcement — parse millicores/memory and cap
-  if (!requested) return max;
-  // For now, just return what was requested — proper parsing could be added
-  return requested;
-}
-
 module.exports = {
   createDeployment,
   createService,
@@ -547,4 +874,5 @@ module.exports = {
   ensureNamespace,
   safeLabel,
   NAMESPACE,
+  diagnosePodFailure,
 };

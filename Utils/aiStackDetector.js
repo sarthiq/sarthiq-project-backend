@@ -229,8 +229,10 @@ function heuristicDetect(buildContext) {
 
       // Express / generic Node.js
       if (allDeps["express"] || allDeps["fastify"] || allDeps["koa"]) {
-        const startCmd =
+        let startCmd =
           pkg.scripts?.start || `node ${pkg.main || "index.js"}`;
+        // NEVER use nodemon in production — replace with node
+        startCmd = startCmd.replace(/nodemon/g, "node");
         return {
           language: "node",
           framework: allDeps["express"]
@@ -248,19 +250,23 @@ function heuristicDetect(buildContext) {
       }
 
       // Generic Node.js fallback
-      return {
-        language: "node",
-        framework: "node",
-        buildCommand: pkg.scripts?.build ? "npm run build" : null,
-        startCommand:
-          pkg.scripts?.start
-            ? "npm start"
-            : `node ${pkg.main || "index.js"}`,
-        port: 3000,
-        isStaticSite: false,
-        buildOutputDir: null,
-        packageManager: detectPackageManager(buildContext),
-      };
+      {
+        let fallbackStart = pkg.scripts?.start
+          ? "npm start"
+          : `node ${pkg.main || "index.js"}`;
+        // NEVER use nodemon in production — replace with node
+        fallbackStart = fallbackStart.replace(/nodemon/g, "node");
+        return {
+          language: "node",
+          framework: "node",
+          buildCommand: pkg.scripts?.build ? "npm run build" : null,
+          startCommand: fallbackStart,
+          port: 3000,
+          isStaticSite: false,
+          buildOutputDir: null,
+          packageManager: detectPackageManager(buildContext),
+        };
+      }
     } catch {
       /* malformed package.json — fall through to AI */
     }
@@ -464,8 +470,10 @@ CMD ["nginx", "-g", "daemon off;"]
   /* ── Node.js SSR (Next.js, Nuxt, Express) ────────────────────── */
   if (language === "node") {
     const buildStep = buildCommand ? `RUN ${buildCommand}` : "";
+    // NEVER use nodemon in production — replace with node
+    let safeStartCmd = (startCommand || "npm start").replace(/nodemon/g, "node");
     // Parse start command to CMD format
-    const cmdParts = (startCommand || "npm start")
+    const cmdParts = safeStartCmd
       .split(" ")
       .map((s) => `"${s}"`)
       .join(", ");
@@ -482,6 +490,13 @@ ${buildStep}
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app ./
+# Ensure the app binds to all interfaces (not just localhost)
+ENV HOST=0.0.0.0
+ENV HOSTNAME=0.0.0.0
+# Run as non-root user for security
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+USER appuser
 EXPOSE ${port || 3000}
 CMD [${cmdParts}]
 `.trim();

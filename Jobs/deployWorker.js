@@ -4,7 +4,7 @@
  *
  * Pipeline Steps:
  *   1. Validate inputs          → reject malicious data before any work
- *   2. Check node capacity      → pick best node
+ *   2. Pre-flight cluster check → verify cluster can schedule pods
  *   3. Clone repo               → via spawn (no shell injection)
  *   4. AI Stack Detection       → detect language, framework, commands, port
  *   5. Root Requirement Check   → detect if sandbox mode needed
@@ -12,17 +12,15 @@
  *   7. Build Docker image       → via spawn (no shell injection)
  *   8. Push to registry
  *   9. Create K8s resources     → with security context + network policy
- *  10. Wait for pod ready
+ *  10. Wait for pod ready       → with full diagnostics
  *  11. Update DB                → DockerInfo.status = 'running'
  *
- * Security changes from original:
- *   - All exec/execSync replaced with spawn (no shell)
- *   - Repo URL, branch, image tags validated before use
- *   - Dockerfile content validated against blocklist
- *   - Build args passed via spawn array (no interpolation)
- *   - Logs sanitized to prevent secret leakage
- *   - Root detection determines secure vs sandbox execution
- *   - AI output validated before use
+ * KEY CHANGES (v2):
+ *   - Pre-flight cluster check BEFORE creating resources
+ *   - Removed nodeName pinning from createDeployment (let scheduler decide)
+ *   - Improved waitForReady error handling with diagnostic info
+ *   - Pass isSingleNodeCluster for control-plane toleration
+ *   - Fixed URL scheme (http for localhost, https for prod)
  */
 const { Worker } = require("bullmq");
 const path = require("path");
@@ -40,7 +38,12 @@ const {
   waitForReady,
   createOrUpdateNetworkPolicy,
 } = require("../Utils/kubeClient");
-const { getBestNode, reserveNode, releaseNode } = require("../Utils/nodeManager");
+const {
+  getBestNode,
+  reserveNode,
+  releaseNode,
+  preflightClusterCheck,
+} = require("../Utils/nodeManager");
 const { detectStack, classifyEnvVars } = require("../Utils/aiStackDetector");
 const { diagnoseError, collectPodLogs } = require("../Utils/aiDebugger");
 
@@ -60,6 +63,7 @@ const { resolveExecutionMode, detectSuspiciousActivity } = require("../Utils/san
 const isProd = process.env.NODE_ENV === "production";
 const REGISTRY = process.env.DOCKER_REGISTRY || (isProd ? "registry.sarthiq.com" : "");
 const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
+const DEPLOY_DOMAIN = isProd ? PROJECT_DOMAIN : "localhost";
 const MAX_AI_RETRIES = Math.min(parseInt(process.env.MAX_AI_RETRIES || "3"), 5); // Cap at 5
 
 /* ------------------------------------------------------------------ */
@@ -109,8 +113,6 @@ async function buildDockerImage({
   for (const [key, value] of Object.entries(buildTimeEnvs)) {
     args.push("--build-arg", `${key}=${value}`);
   }
-
-  // NOTE: removed --memory and --cpus as they are invalid for `docker build` unless using specific buildkit features/config.
 
   // Tag and context
   args.push("-t", imageTag, buildContext);
@@ -175,10 +177,27 @@ const deployWorker = new Worker(
       jobRecord.startedAt = new Date();
       await jobRecord.save();
 
-      /* ── STEP 1: Node capacity check ──────────────────────────────── */
-      await appendLog(jobRecord, "Step 1/9: Checking cluster node capacity...");
+      /* ── STEP 1: Pre-flight cluster check ──────────────────────────── */
+      await appendLog(jobRecord, "Step 1/10: Pre-flight cluster health check...");
+
+      const clusterCheck = await preflightClusterCheck();
+
+      if (!clusterCheck.ok) {
+        await appendLog(jobRecord, `  ❌ Cluster check failed: ${clusterCheck.reason}`);
+        throw new Error(`Pre-flight cluster check failed: ${clusterCheck.reason}`);
+      }
+
+      const isSingleNode = clusterCheck.isSingleNode;
+      await appendLog(
+        jobRecord,
+        `  → Cluster OK: ${clusterCheck.totalSchedulableNodes} schedulable node(s)` +
+          (isSingleNode ? " (single-node cluster)" : "") +
+          (clusterCheck.controlPlaneOnly ? " (control-plane only — tolerations will be applied)" : "")
+      );
+
+      /* ── STEP 1b: Node capacity reservation ───────────────────────── */
       const node = await getBestNode();
-      await appendLog(jobRecord, `  → Assigned to node: ${node.nodeName}`);
+      await appendLog(jobRecord, `  → Capacity reserved on node: ${node.nodeName}`);
       await reserveNode(node.id);
       reservedNodeId = node.id;
 
@@ -188,10 +207,10 @@ const deployWorker = new Worker(
         project.subdomain = sub;
         await project.save();
       }
-      await appendLog(jobRecord, `  → Subdomain: ${project.subdomain}.${PROJECT_DOMAIN}`);
+      await appendLog(jobRecord, `  → Subdomain: ${project.subdomain}.${DEPLOY_DOMAIN}`);
 
       /* ── STEP 3: Clone repository (SECURE — via spawn) ────────────── */
-      await appendLog(jobRecord, "Step 2/9: Cloning repository...");
+      await appendLog(jobRecord, "Step 2/10: Cloning repository...");
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `sarthiq-${projectId}-`));
 
       // Use spawn instead of exec — no shell interpolation possible
@@ -212,7 +231,7 @@ const deployWorker = new Worker(
       }
 
       /* ── STEP 4: AI Stack Detection ───────────────────────────────── */
-      await appendLog(jobRecord, "Step 3/9: 🤖 Analyzing repository with AI stack detector...");
+      await appendLog(jobRecord, "Step 3/10: 🤖 Analyzing repository with AI stack detector...");
 
       // User overrides (user-provided values take priority over AI)
       const userOverrides = {};
@@ -255,7 +274,7 @@ const deployWorker = new Worker(
       let currentDockerfile = detection.dockerfile;
 
       if (!fs.existsSync(dockerfilePath)) {
-        await appendLog(jobRecord, "Step 4/9: Validating AI-generated Dockerfile...");
+        await appendLog(jobRecord, "Step 4/10: Validating AI-generated Dockerfile...");
 
         // VALIDATE Dockerfile content before writing
         const validation = validateDockerfile(currentDockerfile);
@@ -286,7 +305,7 @@ const deployWorker = new Worker(
           );
         }
 
-        await appendLog(jobRecord, "Step 4/9: Using existing Dockerfile from repo (validated).");
+        await appendLog(jobRecord, "Step 4/10: Using existing Dockerfile from repo (validated).");
       }
 
       // Save the Dockerfile used to deployment job
@@ -294,7 +313,7 @@ const deployWorker = new Worker(
       await jobRecord.save();
 
       /* ── STEP 5b: Root requirement detection ──────────────────────── */
-      await appendLog(jobRecord, "Step 5/9: 🔍 Checking root requirements...");
+      await appendLog(jobRecord, "Step 5/10: 🔍 Checking root requirements...");
 
       const rootDetection = detectRootRequirements({
         dockerfileContent: currentDockerfile,
@@ -365,7 +384,7 @@ const deployWorker = new Worker(
       }
 
       /* ── STEP 6: Build Docker image (with AI retry loop) ──────────── */
-      await appendLog(jobRecord, "Step 6/9: Building Docker image...");
+      await appendLog(jobRecord, "Step 6/10: Building Docker image...");
       const imageTag = REGISTRY
         ? `${REGISTRY}/${project.subdomain}:${Date.now()}`
         : `${project.subdomain}:${Date.now()}`;
@@ -470,11 +489,11 @@ const deployWorker = new Worker(
 
       /* ── STEP 7: Push image ───────────────────────────────────────── */
       if (REGISTRY) {
-        await appendLog(jobRecord, "Step 7/9: Pushing image to registry...");
+        await appendLog(jobRecord, "Step 7/10: Pushing image to registry...");
         await spawnAsync("docker", ["push", imageTag], { timeout: 300_000 });
         await appendLog(jobRecord, "  → Push complete.");
       } else {
-        await appendLog(jobRecord, "Step 7/9: Local testing mode. Skipping registry push.");
+        await appendLog(jobRecord, "Step 7/10: Local testing mode. Skipping registry push.");
       }
 
       /* Clean up temp dir */
@@ -484,7 +503,7 @@ const deployWorker = new Worker(
       }
 
       /* ── STEP 8: Create K8s resources (with security context) ────── */
-      await appendLog(jobRecord, "Step 8/9: Creating Kubernetes resources...");
+      await appendLog(jobRecord, "Step 8/10: Creating Kubernetes resources...");
 
       const cpuLimit = dockerInfo.cpu || securityConfig.maxCpu || "500m";
       let memLimit = dockerInfo.memory || securityConfig.maxMemory || "512Mi";
@@ -503,9 +522,10 @@ const deployWorker = new Worker(
         cpuRequest: "100m",
         memoryRequest: "128Mi",
         envVars: detection.runtimeEnvs,
+        // ── nodeName is for DB tracking only — NOT used for K8s nodeSelector ──
         nodeName: node.nodeName,
         useConfigMap: true,
-        // ── NEW: Security configuration ──
+        // ── Security configuration ──
         executionMode: execMode,
         podSecurityContext: securityConfig.podSecurityContext,
         containerSecurityContext: securityConfig.containerSecurityContext,
@@ -513,6 +533,8 @@ const deployWorker = new Worker(
         labels: securityConfig.labels,
         namespace: securityConfig.namespace,
         activeDeadlineSeconds: securityConfig.activeDeadlineSeconds,
+        // ── NEW: pass single-node flag for control-plane toleration ──
+        isSingleNodeCluster: isSingleNode,
       });
       await appendLog(jobRecord, `  → Deployment + ConfigMap created (mode: ${execMode}).`);
 
@@ -533,56 +555,83 @@ const deployWorker = new Worker(
       const publicHost = await createIngress({
         name: deployName,
         subdomain: project.subdomain,
-        baseDomain: PROJECT_DOMAIN,
+        baseDomain: DEPLOY_DOMAIN,
       });
       await appendLog(jobRecord, `  → Ingress created: ${publicHost}`);
 
-      /* ── STEP 9: Wait for pod ready ───────────────────────────────── */
-      await appendLog(jobRecord, "Step 9/9: Waiting for pod to become ready...");
+      /* ── STEP 9: Wait for pod ready (with diagnostics) ────────────── */
+      await appendLog(jobRecord, "Step 9/10: Waiting for pod to become ready...");
 
       try {
         await waitForReady(deployName, 180_000);
         await appendLog(jobRecord, "  → Pod is running! 🚀");
       } catch (readyErr) {
-        // Pod failed to become ready — try AI debugging on runtime error
-        await appendLog(jobRecord, `  ⚠ Pod not ready: ${readyErr.message}`);
-        await appendLog(jobRecord, "  🤖 Collecting pod logs for AI diagnosis...");
+        // Pod failed to become ready — extract diagnostic details
+        const diagnostic = readyErr.diagnostic || {};
+        await appendLog(jobRecord, `  ⚠ Pod not ready: ${readyErr.message.slice(0, 300)}`);
 
-        const podLogs = await collectPodLogs(deployName);
-
-        // Check for suspicious activity in pod logs
-        const suspicious = detectSuspiciousActivity(podLogs);
-        if (suspicious.suspicious) {
+        // Log diagnostic details
+        if (diagnostic.phase) {
+          await appendLog(jobRecord, `  → Pod phase: ${diagnostic.phase}`);
+        }
+        if (diagnostic.events && diagnostic.events.length > 0) {
+          await appendLog(jobRecord, `  → Pod events:\n${diagnostic.events.join("\n")}`);
+        }
+        if (diagnostic.containerLogs) {
           await appendLog(
             jobRecord,
-            `  🚨 SECURITY: Suspicious activity in pod: ${suspicious.matches.join(", ")}. Terminating.`
+            `  → Container logs (last lines):\n${diagnostic.containerLogs.slice(0, 500)}`
           );
-          // Force delete deployment
-          const { deleteProjectResources } = require("../Utils/kubeClient");
-          await deleteProjectResources(deployName).catch(() => {});
-          throw new Error("Deployment terminated: suspicious activity detected in container.");
         }
 
-        const runtimeDiagnosis = await diagnoseError({
-          language: detection.language,
-          framework: detection.framework,
-          buildCommand: detection.buildCommand,
-          startCommand: detection.startCommand,
-          dockerfileContent: currentDockerfile,
-          errorLogs: sanitizeLogLine(podLogs),
-          errorPhase: "readiness",
-          previousAttempts: allDiagnoses,
-        });
+        // Only run AI diagnosis for app-level issues, not scheduling/infra issues
+        if (diagnostic.isSchedulingIssue || diagnostic.isResourceIssue) {
+          await appendLog(
+            jobRecord,
+            "  ℹ️ This is an infrastructure/scheduling issue, not an application error. " +
+              "Check cluster node health and resource availability."
+          );
+        } else {
+          // App crash or image issue — AI can potentially help
+          await appendLog(jobRecord, "  🤖 Collecting pod logs for AI diagnosis...");
 
-        allDiagnoses.push(runtimeDiagnosis);
-        jobRecord.aiDiagnosis = allDiagnoses;
-        await jobRecord.save();
+          const podLogs = await collectPodLogs(deployName);
 
-        await appendLog(jobRecord, `  🤖 Runtime diagnosis: ${runtimeDiagnosis.diagnosis}`);
+          // Check for suspicious activity in pod logs
+          const suspicious = detectSuspiciousActivity(podLogs);
+          if (suspicious.suspicious) {
+            await appendLog(
+              jobRecord,
+              `  🚨 SECURITY: Suspicious activity in pod: ${suspicious.matches.join(", ")}. Terminating.`
+            );
+            // Force delete deployment
+            const { deleteProjectResources } = require("../Utils/kubeClient");
+            await deleteProjectResources(deployName).catch(() => {});
+            throw new Error("Deployment terminated: suspicious activity detected in container.");
+          }
+
+          const runtimeDiagnosis = await diagnoseError({
+            language: detection.language,
+            framework: detection.framework,
+            buildCommand: detection.buildCommand,
+            startCommand: detection.startCommand,
+            dockerfileContent: currentDockerfile,
+            errorLogs: sanitizeLogLine(podLogs),
+            errorPhase: "readiness",
+            previousAttempts: allDiagnoses,
+          });
+
+          allDiagnoses.push(runtimeDiagnosis);
+          jobRecord.aiDiagnosis = allDiagnoses;
+          await jobRecord.save();
+
+          await appendLog(jobRecord, `  🤖 Runtime diagnosis: ${runtimeDiagnosis.diagnosis}`);
+        }
+
         throw readyErr;
       }
 
-      /* ── Update dockerInfo ──────────────────────────────────────── */
+      /* ── STEP 10: Update dockerInfo ─────────────────────────────── */
       dockerInfo.image = imageTag;
       dockerInfo.status = "running";
       dockerInfo.nodeId = node.nodeName;
@@ -595,12 +644,15 @@ const deployWorker = new Worker(
       jobRecord.completedAt = new Date();
       await jobRecord.save();
 
+      // Use correct URL scheme — http for localhost, https for production
+      const urlScheme = DEPLOY_DOMAIN === "localhost" ? "http" : "https";
+
       await appendLog(
         jobRecord,
-        `✅ Deployment complete (${execMode} mode). Live at: https://${publicHost}`
+        `✅ Deployment complete (${execMode} mode). Live at: ${urlScheme}://${publicHost}`
       );
 
-      return { success: true, url: `https://${publicHost}`, executionMode: execMode };
+      return { success: true, url: `${urlScheme}://${publicHost}`, executionMode: execMode };
     } catch (err) {
       console.error("[deployWorker] FATAL:", err.stack);
       await appendLog(jobRecord, `❌ Error: ${sanitizeLogLine(err.message)}`);
