@@ -278,6 +278,8 @@ async function createDeployment({
             {
               name: label,
               image,
+              // Always pull from registry in prod; use local cache in dev
+              imagePullPolicy: image.includes("/") ? "Always" : "IfNotPresent",
               ports: [{ containerPort }],
               ...envConfig,
 
