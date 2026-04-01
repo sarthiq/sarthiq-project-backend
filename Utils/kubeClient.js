@@ -27,18 +27,16 @@ kc.loadFromDefault();
 
 // Fail fast if the loaded config has no usable cluster server URL
 const _cluster = kc.getCurrentCluster();
-if (
-  !_cluster ||
-  !_cluster.server ||
-  _cluster.server.includes("undefined")
-) {
+if (!_cluster || !_cluster.server || _cluster.server.includes("undefined")) {
   console.error(
     "[kubeClient] ⚠ No valid Kubernetes cluster URL found. Server:",
     _cluster?.server,
-    "— Ensure ~/.kube/config or KUBECONFIG env var is set correctly."
+    "— Ensure ~/.kube/config or KUBECONFIG env var is set correctly.",
   );
 } else {
-  console.log(`[kubeClient] ✓ Connected to cluster: ${_cluster.name} (${_cluster.server})`);
+  console.log(
+    `[kubeClient] ✓ Connected to cluster: ${_cluster.name} (${_cluster.server})`,
+  );
 }
 
 const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
@@ -56,7 +54,10 @@ const MAX_MEMORY_LIMIT = process.env.MAX_MEMORY_LIMIT || "1024Mi";
 /* Helper: safe label name from project subdomain                       */
 /* ------------------------------------------------------------------ */
 function safeLabel(name) {
-  return name.replace(/[^a-z0-9-]/gi, "-").toLowerCase().slice(0, 52);
+  return name
+    .replace(/[^a-z0-9-]/gi, "-")
+    .toLowerCase()
+    .slice(0, 52);
 }
 
 /* ------------------------------------------------------------------ */
@@ -90,7 +91,7 @@ function enforceResourceCap(requested, max, type) {
     const maxMilli = parseCpuToMillicores(max);
     if (reqMilli > maxMilli) {
       console.log(
-        `[kubeClient] Capping CPU: ${requested} → ${max} (exceeds max)`
+        `[kubeClient] Capping CPU: ${requested} → ${max} (exceeds max)`,
       );
       return max;
     }
@@ -101,7 +102,7 @@ function enforceResourceCap(requested, max, type) {
     const maxMi = parseMemoryToMi(max);
     if (reqMi > maxMi) {
       console.log(
-        `[kubeClient] Capping Memory: ${requested} → ${max} (exceeds max)`
+        `[kubeClient] Capping Memory: ${requested} → ${max} (exceeds max)`,
       );
       return max;
     }
@@ -140,7 +141,10 @@ async function ensureNamespace(ns) {
         _nsCache.add(ns);
         return;
       }
-      console.error(`[kubeClient] ✗ Failed to create namespace '${ns}':`, createErr.message);
+      console.error(
+        `[kubeClient] ✗ Failed to create namespace '${ns}':`,
+        createErr.message,
+      );
       throw createErr;
     }
   }
@@ -179,12 +183,20 @@ async function createDeployment({
 
   // Enforce resource caps
   const enforcedCpuLimit = enforceResourceCap(cpuLimit, MAX_CPU_LIMIT, "cpu");
-  const enforcedMemLimit = enforceResourceCap(memoryLimit, MAX_MEMORY_LIMIT, "memory");
+  const enforcedMemLimit = enforceResourceCap(
+    memoryLimit,
+    MAX_MEMORY_LIMIT,
+    "memory",
+  );
 
   // Build env injection strategy
   let envConfig = {};
   if (useConfigMap) {
-    await createOrUpdateConfigMap({ name: label, envVars, namespace: targetNamespace });
+    await createOrUpdateConfigMap({
+      name: label,
+      envVars,
+      namespace: targetNamespace,
+    });
     envConfig = {
       envFrom: [{ configMapRef: { name: `${label}-env` } }],
     };
@@ -227,7 +239,7 @@ async function createDeployment({
         key: "node-role.kubernetes.io/master",
         operator: "Exists",
         effect: "NoSchedule",
-      }
+      },
     );
   }
 
@@ -377,9 +389,16 @@ async function createService({ name, containerPort, namespace = null }) {
     .catch(() => null);
 
   if (existing) {
-    await coreV1.replaceNamespacedService({ name: label, namespace: targetNamespace, body: svc });
+    await coreV1.replaceNamespacedService({
+      name: label,
+      namespace: targetNamespace,
+      body: svc,
+    });
   } else {
-    await coreV1.createNamespacedService({ namespace: targetNamespace, body: svc });
+    await coreV1.createNamespacedService({
+      namespace: targetNamespace,
+      body: svc,
+    });
   }
 
   return `${label}.${targetNamespace}.svc.cluster.local`;
@@ -465,7 +484,11 @@ async function createIngress({ name, subdomain, baseDomain }) {
 /* ------------------------------------------------------------------ */
 /* CREATE / UPDATE: ConfigMap for runtime env vars                     */
 /* ------------------------------------------------------------------ */
-async function createOrUpdateConfigMap({ name, envVars = {}, namespace = null }) {
+async function createOrUpdateConfigMap({
+  name,
+  envVars = {},
+  namespace = null,
+}) {
   const cmName = `${name}-env`;
   const targetNamespace = namespace || NAMESPACE;
 
@@ -511,9 +534,7 @@ async function createOrUpdateConfigMap({ name, envVars = {}, namespace = null })
 /* ------------------------------------------------------------------ */
 async function scaleDeployment(name, replicas) {
   const label = safeLabel(name);
-  const patch = [
-    { op: "replace", path: "/spec/replicas", value: replicas },
-  ];
+  const patch = [{ op: "replace", path: "/spec/replicas", value: replicas }];
 
   await appsV1.patchNamespacedDeployment(
     {
@@ -527,7 +548,7 @@ async function scaleDeployment(name, replicas) {
     undefined,
     undefined,
     undefined,
-    { headers: { "Content-Type": "application/json-patch+json" } }
+    { headers: { "Content-Type": "application/json-patch+json" } },
   );
 }
 
@@ -550,6 +571,7 @@ async function diagnosePodFailure(label, targetNamespace) {
     isImageIssue: false,
     isAppCrash: false,
     isResourceIssue: false,
+    isInfrastructureIssue: false,
   };
 
   try {
@@ -561,7 +583,8 @@ async function diagnosePodFailure(label, targetNamespace) {
 
     const pods = podList.items || [];
     if (pods.length === 0) {
-      diagnostic.reason = "No pods created by the deployment. Check deployment spec.";
+      diagnostic.reason =
+        "No pods created by the deployment. Check deployment spec.";
       diagnostic.isSchedulingIssue = true;
       return diagnostic;
     }
@@ -675,8 +698,22 @@ async function diagnosePodFailure(label, targetNamespace) {
         .slice(-10) // last 10 events
         .map(
           (e) =>
-            `[${e.type}] ${e.reason}: ${e.message} (${e.lastTimestamp || e.eventTime || ""})`
+            `[${e.type}] ${e.reason}: ${e.message} (${e.lastTimestamp || e.eventTime || ""})`,
         );
+
+      const combinedEventsText = diagnostic.events.join("\n");
+      if (
+        combinedEventsText.includes('plugin type="loopback" failed') &&
+        combinedEventsText.includes(
+          'failed to find plugin "loopback" in path [/opt/cni/bin]',
+        )
+      ) {
+        diagnostic.isInfrastructureIssue = true;
+        diagnostic.reason =
+          "Cluster CNI is misconfigured: missing loopback plugin in /opt/cni/bin. " +
+          "This is a node/runtime issue (not an application image issue). " +
+          "Install CNI plugins on the node and restart kubelet/container runtime.";
+      }
     } catch {
       // Non-fatal
     }
@@ -735,7 +772,7 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
       if (diagnostic.isImageIssue) {
         // ImagePullBackOff won't resolve itself
         const err = new Error(
-          `Deployment ${label} failed: ${diagnostic.reason}`
+          `Deployment ${label} failed: ${diagnostic.reason}`,
         );
         err.diagnostic = diagnostic;
         throw err;
@@ -745,16 +782,29 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
         // CrashLoopBackOff — app keeps crashing, waiting won't help
         const err = new Error(
           `Deployment ${label} failed: ${diagnostic.reason}\n` +
-            `Container logs:\n${diagnostic.containerLogs || "(no logs)"}`
+            `Container logs:\n${diagnostic.containerLogs || "(no logs)"}`,
         );
         err.diagnostic = diagnostic;
         throw err;
       }
 
-      if (diagnostic.isResourceIssue && diagnostic.phase === "Pending" && elapsed > 30_000) {
+      if (
+        diagnostic.isResourceIssue &&
+        diagnostic.phase === "Pending" &&
+        elapsed > 30_000
+      ) {
         // Resource issues on Pending — no node can accommodate this pod
         const err = new Error(
-          `Deployment ${label} failed: ${diagnostic.reason}`
+          `Deployment ${label} failed: ${diagnostic.reason}`,
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      if (diagnostic.isInfrastructureIssue && elapsed > 20_000) {
+        // Cluster/CNI runtime problems will not resolve by waiting longer
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`,
         );
         err.diagnostic = diagnostic;
         throw err;
@@ -765,7 +815,7 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
         console.log(
           `[kubeClient] waitForReady: ${label} — phase: ${diagnostic.phase}, ` +
             `reason: ${diagnostic.reason.slice(0, 100)}, ` +
-            `elapsed: ${Math.round(elapsed / 1000)}s`
+            `elapsed: ${Math.round(elapsed / 1000)}s`,
         );
         earlyExitChecked = true;
       }
@@ -787,7 +837,7 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
         : "") +
       (finalDiagnostic.events.length > 0
         ? `Pod events:\n${finalDiagnostic.events.join("\n")}\n`
-        : "")
+        : ""),
   );
   err.diagnostic = finalDiagnostic;
   throw err;
