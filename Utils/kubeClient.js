@@ -550,6 +550,7 @@ async function diagnosePodFailure(label, targetNamespace) {
     isImageIssue: false,
     isAppCrash: false,
     isResourceIssue: false,
+    isInfrastructureIssue: false,
   };
 
   try {
@@ -677,6 +678,18 @@ async function diagnosePodFailure(label, targetNamespace) {
           (e) =>
             `[${e.type}] ${e.reason}: ${e.message} (${e.lastTimestamp || e.eventTime || ""})`
         );
+
+      const combinedEventsText = diagnostic.events.join("\n");
+      if (
+        combinedEventsText.includes('plugin type="loopback" failed') &&
+        combinedEventsText.includes('failed to find plugin "loopback" in path [/opt/cni/bin]')
+      ) {
+        diagnostic.isInfrastructureIssue = true;
+        diagnostic.reason =
+          "Cluster CNI is misconfigured: missing loopback plugin in /opt/cni/bin. " +
+          "This is a node/runtime issue (not an application image issue). " +
+          "Install CNI plugins on the node and restart kubelet/container runtime.";
+      }
     } catch {
       // Non-fatal
     }
@@ -753,6 +766,15 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
 
       if (diagnostic.isResourceIssue && diagnostic.phase === "Pending" && elapsed > 30_000) {
         // Resource issues on Pending — no node can accommodate this pod
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      if (diagnostic.isInfrastructureIssue && elapsed > 20_000) {
+        // Cluster/CNI runtime problems will not resolve by waiting longer
         const err = new Error(
           `Deployment ${label} failed: ${diagnostic.reason}`
         );
