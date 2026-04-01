@@ -704,9 +704,7 @@ async function diagnosePodFailure(label, targetNamespace) {
       const combinedEventsText = diagnostic.events.join("\n");
       if (
         combinedEventsText.includes('plugin type="loopback" failed') &&
-        combinedEventsText.includes(
-          'failed to find plugin "loopback" in path [/opt/cni/bin]',
-        )
+        combinedEventsText.includes('failed to find plugin "loopback" in path [/opt/cni/bin]')
       ) {
         diagnostic.isInfrastructureIssue = true;
         diagnostic.reason =
@@ -805,6 +803,15 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
         // Cluster/CNI runtime problems will not resolve by waiting longer
         const err = new Error(
           `Deployment ${label} failed: ${diagnostic.reason}`,
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
+      if (diagnostic.isInfrastructureIssue && elapsed > 20_000) {
+        // Cluster/CNI runtime problems will not resolve by waiting longer
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`
         );
         err.diagnostic = diagnostic;
         throw err;
