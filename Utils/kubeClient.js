@@ -810,6 +810,15 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
         throw err;
       }
 
+      if (diagnostic.isInfrastructureIssue && elapsed > 20_000) {
+        // Cluster/CNI runtime problems will not resolve by waiting longer
+        const err = new Error(
+          `Deployment ${label} failed: ${diagnostic.reason}`,
+        );
+        err.diagnostic = diagnostic;
+        throw err;
+      }
+
       // Log progress every 30 seconds
       if (!earlyExitChecked || elapsed % 30_000 < pollInterval) {
         console.log(
