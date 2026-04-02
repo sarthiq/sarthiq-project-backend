@@ -201,6 +201,32 @@ function parseMemoryToMi(mem) {
 }
 
 /**
+ * Normalize Docker-style memory shorthand to K8s format.
+ * DockerInfo stores "512m" meaning 512 MiB, but K8s uses "512Mi".
+ * Without this, parseMemoryToMi("512m") hits raw-bytes fallback → ~0.
+ */
+function normalizeMemoryUnit(mem) {
+  if (!mem) return "0Mi";
+  const str = String(mem);
+  // Docker shorthand: "512m" = 512 MiB (lowercase m, no 'i')
+  if (/^\d+m$/.test(str)) return str.replace("m", "Mi");
+  return str;
+}
+
+/**
+ * Normalize CPU value to consistent format.
+ * DockerInfo stores "0.5" meaning 500m.
+ */
+function normalizeCpuUnit(cpu) {
+  if (!cpu) return "0m";
+  const str = String(cpu);
+  if (str.endsWith("m")) return str;
+  // Bare number like "0.5" = 500m
+  const millis = Math.round(parseFloat(str) * 1000);
+  return `${millis}m`;
+}
+
+/**
  * Get pod resource metrics (CPU + Memory) with limits.
  *
  * @param {string} podName
@@ -209,6 +235,9 @@ function parseMemoryToMi(mem) {
  * @returns {{ cpu: { used, limit, usedMillicores, limitMillicores, percentage }, memory: { ... } }}
  */
 async function getPodMetrics(podName, containerName, dockerInfo) {
+  const normalizedMemLimit = normalizeMemoryUnit(dockerInfo.memory);
+  const normalizedCpuLimit = normalizeCpuUnit(dockerInfo.cpu);
+  
   try {
     // Fetch current usage from metrics-server
     const metricsResponse = await metricsClient.getPodMetrics(NAMESPACE);
@@ -218,8 +247,8 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
 
     if (!podMetrics) {
       return {
-        cpu: { used: "0m", limit: dockerInfo.cpu, usedMillicores: 0, limitMillicores: parseCpuToMillicores(dockerInfo.cpu), percentage: 0 },
-        memory: { used: "0Mi", limit: dockerInfo.memory, usedMi: 0, limitMi: parseMemoryToMi(dockerInfo.memory), percentage: 0 },
+        cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
+        memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
         available: false,
         message: "Metrics not yet available (pod may have just started)",
       };
@@ -234,21 +263,21 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
     const memUsed = containerMetrics?.usage?.memory || "0";
 
     const cpuUsedMilli = parseCpuToMillicores(cpuUsed);
-    const cpuLimitMilli = parseCpuToMillicores(dockerInfo.cpu);
+    const cpuLimitMilli = parseCpuToMillicores(normalizedCpuLimit);
     const memUsedMi = parseMemoryToMi(memUsed);
-    const memLimitMi = parseMemoryToMi(dockerInfo.memory);
+    const memLimitMi = parseMemoryToMi(normalizedMemLimit);
 
     return {
       cpu: {
         used: `${Math.round(cpuUsedMilli)}m`,
-        limit: dockerInfo.cpu,
+        limit: normalizedCpuLimit,
         usedMillicores: Math.round(cpuUsedMilli),
         limitMillicores: cpuLimitMilli,
         percentage: cpuLimitMilli > 0 ? Math.min(100, Math.round((cpuUsedMilli / cpuLimitMilli) * 100)) : 0,
       },
       memory: {
         used: `${Math.round(memUsedMi)}Mi`,
-        limit: dockerInfo.memory,
+        limit: normalizedMemLimit,
         usedMi: Math.round(memUsedMi),
         limitMi: memLimitMi,
         percentage: memLimitMi > 0 ? Math.min(100, Math.round((memUsedMi / memLimitMi) * 100)) : 0,
@@ -263,8 +292,8 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
       getPodMetrics._loggedError = true;
     }
     return {
-      cpu: { used: "0m", limit: dockerInfo.cpu, usedMillicores: 0, limitMillicores: parseCpuToMillicores(dockerInfo.cpu), percentage: 0 },
-      memory: { used: "0Mi", limit: dockerInfo.memory, usedMi: 0, limitMi: parseMemoryToMi(dockerInfo.memory), percentage: 0 },
+      cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
+      memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
       available: false,
       message: "Metrics server unavailable — install metrics-server addon",
     };

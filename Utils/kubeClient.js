@@ -861,8 +861,28 @@ async function deleteProjectResources(name) {
 }
 
 /* ------------------------------------------------------------------ */
-/* READ: node metrics from metrics-server                              */
+/* READ: K8s resources and metrics                                    */
 /* ------------------------------------------------------------------ */
+async function getNodes() {
+  try {
+    const res = await coreV1.listNode();
+    return res.items || [];
+  } catch (err) {
+    console.error("[kubeClient] Error fetching nodes:", err.message);
+    return [];
+  }
+}
+
+async function getPods() {
+  try {
+    const res = await coreV1.listPodForAllNamespaces();
+    return res.items || [];
+  } catch (err) {
+    console.error("[kubeClient] Error fetching pods:", err.message);
+    return [];
+  }
+}
+
 async function getNodeMetrics() {
   try {
     const metrics = await metricsClient.getNodeMetrics();
@@ -870,6 +890,23 @@ async function getNodeMetrics() {
       nodeName: item.metadata.name,
       cpuUsage: item.usage.cpu, // e.g. "150m"
       memUsage: item.usage.memory, // e.g. "512Mi"
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function getPodMetrics() {
+  try {
+    const metrics = await metricsClient.getPodMetrics();
+    return metrics.items.map((item) => ({
+      podName: item.metadata.name,
+      namespace: item.metadata.namespace,
+      containers: item.containers.map((c) => ({
+        name: c.name,
+        cpuUsage: c.usage.cpu,
+        memUsage: c.usage.memory,
+      })),
     }));
   } catch {
     return [];
@@ -922,6 +959,9 @@ module.exports = {
   waitForReady,
   deleteProjectResources,
   getNodeMetrics,
+  getNodes,
+  getPods,
+  getPodMetrics,
   getServiceClusterIP,
   ensureNamespace,
   safeLabel,

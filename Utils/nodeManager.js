@@ -230,10 +230,9 @@ async function preflightClusterCheck() {
 async function syncNodeMetrics() {
   const live = await getNodeMetrics();
   for (const m of live) {
-    // parse "150m" → 150
-    const usedCpu = parseInt(m.cpuUsage) || 0;
-    // parse "512Mi" → 512
-    const usedMem = parseInt(m.memUsage) || 0;
+    // Use proper parsers — raw parseInt fails on nanocores ("600448522n" → 600448522 WRONG)
+    const usedCpu = parseCpuToMillicores(m.cpuUsage);
+    const usedMem = parseMemoryToMi(m.memUsage);
 
     // Only update usage numbers — don't create fake entries
     const existing = await KubeNode.findOne({
