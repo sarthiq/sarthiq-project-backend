@@ -201,75 +201,200 @@ function parseMemoryToMi(mem) {
 }
 
 /**
- * Get pod resource metrics (CPU + Memory) with limits.
+ * Normalize Docker-style memory shorthand to K8s format.
+ * DockerInfo stores "512m" meaning 512 MiB, but K8s uses "512Mi".
+ * Without this, parseMemoryToMi("512m") hits raw-bytes fallback → ~0.
+ */
+function normalizeMemoryUnit(mem) {
+  if (!mem) return "0Mi";
+  const str = String(mem);
+  // Docker shorthand: "512m" = 512 MiB (lowercase m, no 'i')
+  if (/^\d+m$/.test(str)) return str.replace("m", "Mi");
+  return str;
+}
+
+/**
+ * Normalize CPU value to consistent format.
+ * DockerInfo stores "0.5" meaning 500m.
+ */
+function normalizeCpuUnit(cpu) {
+  if (!cpu) return "0m";
+  const str = String(cpu);
+  if (str.endsWith("m")) return str;
+  // Bare number like "0.5" = 500m
+  const millis = Math.round(parseFloat(str) * 1000);
+  return `${millis}m`;
+}
+
+/* ---- Storage helpers ------------------------------------------------ */
+function parseDiskToMi(disk) {
+  if (!disk) return 0;
+  const str = String(disk).trim();
+  // "1Gi" → 1024Mi, "512Mi" → 512, "10g" → 10240Mi, "500m" → 500Mi docker style
+  if (/^\d+Gi$/i.test(str)) return parseInt(str) * 1024;
+  if (/^\d+Mi$/i.test(str)) return parseInt(str);
+  if (/^\d+Ki$/i.test(str)) return Math.round(parseInt(str) / 1024);
+  if (/^\d+g$/i.test(str)) return parseInt(str) * 1024;
+  if (/^\d+m$/i.test(str)) return parseInt(str); // docker "512m" = 512MiB
+  // raw bytes
+  const n = parseInt(str);
+  if (!isNaN(n)) return Math.round(n / (1024 * 1024));
+  return 0;
+}
+
+/* ---- Read /proc/net/dev from inside pod via kubectl exec ------------ */
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
+
+async function getPodNetworkStats(podName, namespace) {
+  try {
+    const { stdout } = await execFileAsync("kubectl", [
+      "exec", podName,
+      "-n", namespace,
+      "--", "cat", "/proc/net/dev"
+    ], { timeout: 5000 });
+
+    // Parse /proc/net/dev — skip headers, find eth0 or any non-lo interface
+    let rxBytes = 0, txBytes = 0, rxPackets = 0, txPackets = 0;
+    const lines = stdout.trim().split("\n").slice(2); // skip 2 header lines
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const iface = parts[0].replace(":", "");
+      if (iface === "lo") continue; // skip loopback
+      // Format: iface rx_bytes rx_packets rx_errs rx_drop rx_fifo rx_frame rx_compressed rx_multicast tx_bytes ...
+      rxBytes += parseInt(parts[1]) || 0;
+      rxPackets += parseInt(parts[2]) || 0;
+      txBytes += parseInt(parts[9]) || 0;
+      txPackets += parseInt(parts[10]) || 0;
+    }
+
+    return {
+      rxBytes,
+      txBytes,
+      rxMB: parseFloat((rxBytes / (1024 * 1024)).toFixed(2)),
+      txMB: parseFloat((txBytes / (1024 * 1024)).toFixed(2)),
+      rxPackets,
+      txPackets,
+      available: true,
+    };
+  } catch {
+    return { rxBytes: 0, txBytes: 0, rxMB: 0, txMB: 0, rxPackets: 0, txPackets: 0, available: false };
+  }
+}
+
+/**
+ * Get pod resource metrics (CPU + Memory + Storage + Network) with limits.
  *
  * @param {string} podName
  * @param {string} containerName
  * @param {object} dockerInfo - from DB, contains limit info
- * @returns {{ cpu: { used, limit, usedMillicores, limitMillicores, percentage }, memory: { ... } }}
+ * @returns {{ cpu, memory, storage, network, available }}
  */
 async function getPodMetrics(podName, containerName, dockerInfo) {
+  const normalizedMemLimit = normalizeMemoryUnit(dockerInfo.memory);
+  const normalizedCpuLimit = normalizeCpuUnit(dockerInfo.cpu);
+  const diskLimitMi = parseDiskToMi(dockerInfo.disk || "1Gi");
+  
+  // Fetch CPU/Memory from metrics-server + network concurrently
+  const [metricsResult, networkStats] = await Promise.allSettled([
+    metricsClient.getPodMetrics(NAMESPACE),
+    getPodNetworkStats(podName, NAMESPACE),
+  ]);
+
+  // Fetch pod status for ephemeral storage usage
+  let storageUsedMi = 0;
   try {
-    // Fetch current usage from metrics-server
-    const metricsResponse = await metricsClient.getPodMetrics(NAMESPACE);
-    const podMetrics = metricsResponse.items.find(
-      (item) => item.metadata.name === podName
-    );
-
-    if (!podMetrics) {
-      return {
-        cpu: { used: "0m", limit: dockerInfo.cpu, usedMillicores: 0, limitMillicores: parseCpuToMillicores(dockerInfo.cpu), percentage: 0 },
-        memory: { used: "0Mi", limit: dockerInfo.memory, usedMi: 0, limitMi: parseMemoryToMi(dockerInfo.memory), percentage: 0 },
-        available: false,
-        message: "Metrics not yet available (pod may have just started)",
-      };
+    const podList = await coreV1.listNamespacedPod({
+      namespace: NAMESPACE,
+      fieldSelector: `metadata.name=${podName}`,
+    });
+    const pod = podList.items?.[0];
+    const ephemeralUsage = pod?.status?.ephemeralContainerStatuses?.[0]
+      || pod?.status?.containerStatuses?.[0];
+    // K8s exposes ephemeralStorage in pod.status.containerStatuses[].allocatedResources
+    const allocResources = ephemeralUsage?.allocatedResources?.["ephemeral-storage"];
+    if (allocResources) {
+      storageUsedMi = parseDiskToMi(allocResources);
     }
+  } catch {
+    storageUsedMi = 0;
+  }
 
-    // Find the container metrics
-    const containerMetrics = podMetrics.containers?.find(
-      (c) => c.name === containerName
-    ) || podMetrics.containers?.[0];
+  const netStats = networkStats.status === "fulfilled" ? networkStats.value :
+    { rxBytes: 0, txBytes: 0, rxMB: 0, txMB: 0, rxPackets: 0, txPackets: 0, available: false };
 
-    const cpuUsed = containerMetrics?.usage?.cpu || "0";
-    const memUsed = containerMetrics?.usage?.memory || "0";
-
-    const cpuUsedMilli = parseCpuToMillicores(cpuUsed);
-    const cpuLimitMilli = parseCpuToMillicores(dockerInfo.cpu);
-    const memUsedMi = parseMemoryToMi(memUsed);
-    const memLimitMi = parseMemoryToMi(dockerInfo.memory);
-
-    return {
-      cpu: {
-        used: `${Math.round(cpuUsedMilli)}m`,
-        limit: dockerInfo.cpu,
-        usedMillicores: Math.round(cpuUsedMilli),
-        limitMillicores: cpuLimitMilli,
-        percentage: cpuLimitMilli > 0 ? Math.min(100, Math.round((cpuUsedMilli / cpuLimitMilli) * 100)) : 0,
-      },
-      memory: {
-        used: `${Math.round(memUsedMi)}Mi`,
-        limit: dockerInfo.memory,
-        usedMi: Math.round(memUsedMi),
-        limitMi: memLimitMi,
-        percentage: memLimitMi > 0 ? Math.min(100, Math.round((memUsedMi / memLimitMi) * 100)) : 0,
-      },
-      available: true,
-    };
-  } catch (err) {
-    // Only log once to avoid spamming every 5 seconds when metrics-server is unavailable
+  // Handle CPU/Memory metrics
+  if (metricsResult.status === "rejected") {
     if (!getPodMetrics._loggedError) {
-      console.warn("[containerService] Metrics server unavailable:", err.message.slice(0, 100));
-      console.warn("[containerService] (Suppressing further metrics errors — install metrics-server to enable live metrics)");
+      console.warn("[containerService] Metrics server unavailable:", metricsResult.reason?.message?.slice(0, 100));
+      console.warn("[containerService] (Suppressing further metrics errors)");
       getPodMetrics._loggedError = true;
     }
     return {
-      cpu: { used: "0m", limit: dockerInfo.cpu, usedMillicores: 0, limitMillicores: parseCpuToMillicores(dockerInfo.cpu), percentage: 0 },
-      memory: { used: "0Mi", limit: dockerInfo.memory, usedMi: 0, limitMi: parseMemoryToMi(dockerInfo.memory), percentage: 0 },
+      cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
+      memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
+      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      network: netStats,
       available: false,
       message: "Metrics server unavailable — install metrics-server addon",
     };
   }
+
+  const metricsResponse = metricsResult.value;
+  const podMetrics = metricsResponse.items.find((item) => item.metadata.name === podName);
+
+  if (!podMetrics) {
+    return {
+      cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
+      memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
+      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      network: netStats,
+      available: false,
+      message: "Metrics not yet available (pod may have just started)",
+    };
+  }
+
+  const containerMetrics = podMetrics.containers?.find((c) => c.name === containerName) || podMetrics.containers?.[0];
+
+  const cpuUsed = containerMetrics?.usage?.cpu || "0";
+  const memUsed = containerMetrics?.usage?.memory || "0";
+
+  const cpuUsedMilli = parseCpuToMillicores(cpuUsed);
+  const cpuLimitMilli = parseCpuToMillicores(normalizedCpuLimit);
+  const memUsedMi = parseMemoryToMi(memUsed);
+  const memLimitMi = parseMemoryToMi(normalizedMemLimit);
+
+  // Storage percentage (of quota/limit)
+  const storagePct = diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0;
+
+  return {
+    cpu: {
+      used: `${Math.round(cpuUsedMilli)}m`,
+      limit: normalizedCpuLimit,
+      usedMillicores: Math.round(cpuUsedMilli),
+      limitMillicores: cpuLimitMilli,
+      percentage: cpuLimitMilli > 0 ? Math.min(100, Math.round((cpuUsedMilli / cpuLimitMilli) * 100)) : 0,
+    },
+    memory: {
+      used: `${Math.round(memUsedMi)}Mi`,
+      limit: normalizedMemLimit,
+      usedMi: Math.round(memUsedMi),
+      limitMi: memLimitMi,
+      percentage: memLimitMi > 0 ? Math.min(100, Math.round((memUsedMi / memLimitMi) * 100)) : 0,
+    },
+    storage: {
+      used: `${storageUsedMi}Mi`,
+      limit: `${diskLimitMi}Mi`,
+      usedMi: storageUsedMi,
+      limitMi: diskLimitMi,
+      percentage: storagePct,
+    },
+    network: netStats,
+    available: true,
+  };
 }
+
 
 /* ================================================================== */
 /* 4. WEBSOCKET TERMINAL (K8s Exec)                                    */
@@ -377,7 +502,7 @@ function initContainerWebSocket(server) {
 
           authenticated = true;
 
-          // Send session info
+          // Send session info with generic limits (actual limits are enforced by Kubernetes)
           ws.send(JSON.stringify({
             type: "session_started",
             sessionId,
@@ -385,6 +510,12 @@ function initContainerWebSocket(server) {
             containerName,
             maxDurationMs: terminalManager.MAX_SESSION_DURATION_MS,
             idleTimeoutMs: terminalManager.IDLE_TIMEOUT_MS,
+            resourceLimits: {
+              cpu: "Governed by K8s",
+              memory: "Governed by K8s",
+              disk: "Governed by K8s",
+              pidsLimit: 100,
+            },
           }));
 
           // Attempt bash, fall back to sh
@@ -451,139 +582,139 @@ function initContainerWebSocket(server) {
   });
 }
 
-/**
- * Attach K8s exec stream to the client WebSocket.
- */
 async function attachExecStream(clientWs, sessionId, podName, containerName, shell) {
   try {
     const execInstance = new k8s.Exec(kc);
+    const { PassThrough } = require("stream");
 
-    // Try the requested shell
-    const ws = await execInstance.exec(
-      NAMESPACE,
-      podName,
-      containerName,
-      [shell],
-      process.stdout, // placeholder — we'll override
-      process.stderr,
-      process.stdin,
-      true, // tty
-    );
+    const launchCmd = [
+      "/bin/sh", "-c",
+      `export PS1='\\u@\\h:\\w\\$ '; export TERM=xterm; ` +
+      `if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh; fi`
+    ];
 
-    // The k8s exec returns a WebSocket — pipe it to the client
-    // Actually, the k8s client-node exec API uses a different approach.
-    // Let's use the lower-level Attach/Exec API via WebSocket
-
-    // Use the stream-based approach
-    const streamPassThrough = new (require("stream").PassThrough)();
+    // These PassThrough streams are used by @kubernetes/client-node to pipe
+    // data to/from the K8s exec WebSocket. Test confirmed they work with tty=true.
+    const outStream = new PassThrough();
+    const errStream = new PassThrough();
+    const inStream  = new PassThrough();
 
     const execWs = await execInstance.exec(
       NAMESPACE,
       podName,
       containerName,
-      [shell],
-      streamPassThrough, // stdout
-      streamPassThrough, // stderr
-      null,              // stdin (we'll manually write)
-      true,              // tty
+      launchCmd,
+      outStream,   // stdout
+      errStream,   // stderr
+      inStream,    // stdin
+      true,        // tty
     );
 
-    // Pipe K8s exec output → client WebSocket
-    streamPassThrough.on("data", (data) => {
-      if (clientWs.readyState === 1) { // OPEN
-        clientWs.send(JSON.stringify({
-          type: "output",
-          data: data.toString(),
-        }));
-      }
-    });
+    if (!execWs) throw new Error("K8s exec returned no WebSocket");
+    console.log(`[containerService] Shell connected to ${podName}, execWs.readyState=${execWs.readyState}`);
 
-    streamPassThrough.on("error", (err) => {
-      console.error("[containerService] Exec stream error:", err.message);
+    // ── STDOUT → client ──────────────────────────────────────────────
+    outStream.on("data", (chunk) => {
       if (clientWs.readyState === 1) {
-        clientWs.send(JSON.stringify({
-          type: "error",
-          message: "Shell connection lost",
-        }));
+        clientWs.send(JSON.stringify({ type: "output", data: chunk.toString("utf-8") }));
       }
     });
 
-    // Store stdin writer reference on the session
-    // When client sends input, we need to write to the exec stdin
-    const stdinStream = new (require("stream").PassThrough)();
+    // ── STDERR → client (same output channel) ────────────────────────
+    errStream.on("data", (chunk) => {
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "output", data: chunk.toString("utf-8") }));
+      }
+    });
 
-    // Override the client ws message handler to pipe stdin
+    // ── Exec WS close/error ──────────────────────────────────────────
+    execWs.on("close", () => {
+      console.log(`[containerService] Shell exited for ${podName}`);
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "session_ended", message: "Shell process exited" }));
+      }
+      terminalManager.terminateSession(sessionId, "shell_exited");
+    });
+
+    execWs.on("error", (err) => {
+      console.error("[containerService] execWs error:", err.message);
+    });
+
+    // ── Send initial resize via raw frame (channel 4) ────────────────
+    // This must be a raw binary frame since there's no stream for resize
+    setTimeout(() => {
+      if (execWs.readyState === 1) {
+        const payload = Buffer.from(JSON.stringify({ Width: 220, Height: 50 }), "utf-8");
+        const frame = Buffer.alloc(payload.length + 1);
+        frame[0] = 4; // channel 4 = resize
+        payload.copy(frame, 1);
+        execWs.send(frame);
+      }
+    }, 200);
+
+    // ── Replace client WS message handler to forward input ───────────
     clientWs.removeAllListeners("message");
     clientWs.on("message", (rawMessage) => {
-      const message = rawMessage.toString();
-
+      let parsed;
       try {
-        const parsed = JSON.parse(message);
-
-        if (parsed.type === "input") {
-          // Check for suspicious commands
-          const suspiciousCheck = terminalManager.checkSuspiciousInput(parsed.data);
-          if (suspiciousCheck.suspicious) {
-            clientWs.send(JSON.stringify({
-              type: "warning",
-              message: `⚠ Suspicious command pattern: ${suspiciousCheck.match}`,
-            }));
-          }
-
-          terminalManager.recordActivity(sessionId);
-
-          // Write to K8s exec stdin
-          if (stdinStream.writable) {
-            stdinStream.write(parsed.data);
-          }
-        } else if (parsed.type === "resize") {
-          // Terminal resize — k8s exec supports this via status channel
-          // For now, handled client-side by xterm.js fit addon
-        } else if (parsed.type === "ping") {
-          clientWs.send(JSON.stringify({ type: "pong" }));
-          terminalManager.recordActivity(sessionId);
-        }
+        parsed = JSON.parse(rawMessage.toString());
       } catch {
-        // Raw string input (non-JSON) — treat as stdin
+        // Non-JSON raw data → treat as stdin
         terminalManager.recordActivity(sessionId);
-        if (stdinStream.writable) {
-          stdinStream.write(message);
+        inStream.write(rawMessage.toString());
+        return;
+      }
+
+      if (parsed.type === "input") {
+        const check = terminalManager.checkSuspiciousInput(parsed.data);
+        if (check.suspicious) {
+          clientWs.send(JSON.stringify({
+            type: "warning",
+            message: `⚠ Suspicious pattern blocked: ${check.match}`,
+          }));
+          return;
         }
+        terminalManager.recordActivity(sessionId);
+        // Write to stdin PassThrough → K8s exec → container shell
+        inStream.write(parsed.data);
+
+      } else if (parsed.type === "resize") {
+        if (typeof parsed.cols === "number" && typeof parsed.rows === "number" && execWs.readyState === 1) {
+          const payload = Buffer.from(JSON.stringify({ Width: parsed.cols, Height: parsed.rows }), "utf-8");
+          const frame = Buffer.alloc(payload.length + 1);
+          frame[0] = 4; // channel 4 = resize
+          payload.copy(frame, 1);
+          execWs.send(frame);
+        }
+
+      } else if (parsed.type === "ping") {
+        terminalManager.recordActivity(sessionId);
+        clientWs.send(JSON.stringify({ type: "pong" }));
       }
     });
 
-    // Re-run exec with proper stdin
-    // The k8s client-node Exec API in v1.x works differently:
-    // We need to use the WebSocket-based approach
-    // Let's create a clean exec connection
-
+    // ── MOTD ─────────────────────────────────────────────────────────
+    const now = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     clientWs.send(JSON.stringify({
       type: "output",
-      data: `\r\n\x1b[32m✓ Connected to ${podName}\x1b[0m\r\n\x1b[90mShell: ${shell} | Session timeout: 10 min | Idle timeout: 3 min\x1b[0m\r\n\r\n`,
+      data:
+        `\r\n\x1b[1;36m╔══════════════════════════════════════════╗\x1b[0m\r\n` +
+        `\x1b[1;36m║     SarthiQ Interactive Shell            ║\x1b[0m\r\n` +
+        `\x1b[1;36m╚══════════════════════════════════════════╝\x1b[0m\r\n` +
+        `\r\n` +
+        `\x1b[90m  Container : \x1b[97m${containerName}\x1b[0m\r\n` +
+        `\x1b[90m  Pod       : \x1b[97m${podName}\x1b[0m\r\n` +
+        `\x1b[90m  Connected : \x1b[97m${now}\x1b[0m\r\n` +
+        `\x1b[90m  Limit     : \x1b[97m10 min (idle: 3 min)\x1b[0m\r\n` +
+        `\r\n`,
     }));
 
   } catch (err) {
     console.error("[containerService] Exec attach error:", err.message);
-
-    // If bash fails, try sh
-    if (shell === "/bin/bash") {
-      clientWs.send(JSON.stringify({
-        type: "output",
-        data: "\x1b[33m⚠ bash not available, falling back to sh...\x1b[0m\r\n",
-      }));
-      try {
-        await attachExecStream(clientWs, sessionId, podName, containerName, "/bin/sh");
-        return;
-      } catch {
-        // Both failed
-      }
+    if (clientWs.readyState === 1) {
+      clientWs.send(JSON.stringify({ type: "error", message: `Failed to start shell: ${err.message}` }));
+      clientWs.close(1011, "Exec failed");
     }
-
-    clientWs.send(JSON.stringify({
-      type: "error",
-      message: `Failed to connect shell: ${err.message}`,
-    }));
-    clientWs.close(1011, "Exec failed");
     terminalManager.terminateSession(sessionId, "user_closed");
   }
 }

@@ -530,7 +530,11 @@ const deployWorker = new Worker(
         podSecurityContext: securityConfig.podSecurityContext,
         containerSecurityContext: securityConfig.containerSecurityContext,
         runtimeClassName: securityConfig.runtimeClassName,
-        labels: securityConfig.labels,
+        labels: {
+          ...securityConfig.labels,
+          "sarthiq.com/userId": String(userId),
+          "sarthiq.com/projectId": String(projectId),
+        },
         namespace: securityConfig.namespace,
         activeDeadlineSeconds: securityConfig.activeDeadlineSeconds,
         // ── NEW: pass single-node flag for control-plane toleration ──
