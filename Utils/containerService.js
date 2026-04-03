@@ -226,79 +226,175 @@ function normalizeCpuUnit(cpu) {
   return `${millis}m`;
 }
 
+/* ---- Storage helpers ------------------------------------------------ */
+function parseDiskToMi(disk) {
+  if (!disk) return 0;
+  const str = String(disk).trim();
+  // "1Gi" → 1024Mi, "512Mi" → 512, "10g" → 10240Mi, "500m" → 500Mi docker style
+  if (/^\d+Gi$/i.test(str)) return parseInt(str) * 1024;
+  if (/^\d+Mi$/i.test(str)) return parseInt(str);
+  if (/^\d+Ki$/i.test(str)) return Math.round(parseInt(str) / 1024);
+  if (/^\d+g$/i.test(str)) return parseInt(str) * 1024;
+  if (/^\d+m$/i.test(str)) return parseInt(str); // docker "512m" = 512MiB
+  // raw bytes
+  const n = parseInt(str);
+  if (!isNaN(n)) return Math.round(n / (1024 * 1024));
+  return 0;
+}
+
+/* ---- Read /proc/net/dev from inside pod via kubectl exec ------------ */
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
+
+async function getPodNetworkStats(podName, namespace) {
+  try {
+    const { stdout } = await execFileAsync("kubectl", [
+      "exec", podName,
+      "-n", namespace,
+      "--", "cat", "/proc/net/dev"
+    ], { timeout: 5000 });
+
+    // Parse /proc/net/dev — skip headers, find eth0 or any non-lo interface
+    let rxBytes = 0, txBytes = 0, rxPackets = 0, txPackets = 0;
+    const lines = stdout.trim().split("\n").slice(2); // skip 2 header lines
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const iface = parts[0].replace(":", "");
+      if (iface === "lo") continue; // skip loopback
+      // Format: iface rx_bytes rx_packets rx_errs rx_drop rx_fifo rx_frame rx_compressed rx_multicast tx_bytes ...
+      rxBytes += parseInt(parts[1]) || 0;
+      rxPackets += parseInt(parts[2]) || 0;
+      txBytes += parseInt(parts[9]) || 0;
+      txPackets += parseInt(parts[10]) || 0;
+    }
+
+    return {
+      rxBytes,
+      txBytes,
+      rxMB: parseFloat((rxBytes / (1024 * 1024)).toFixed(2)),
+      txMB: parseFloat((txBytes / (1024 * 1024)).toFixed(2)),
+      rxPackets,
+      txPackets,
+      available: true,
+    };
+  } catch {
+    return { rxBytes: 0, txBytes: 0, rxMB: 0, txMB: 0, rxPackets: 0, txPackets: 0, available: false };
+  }
+}
+
 /**
- * Get pod resource metrics (CPU + Memory) with limits.
+ * Get pod resource metrics (CPU + Memory + Storage + Network) with limits.
  *
  * @param {string} podName
  * @param {string} containerName
  * @param {object} dockerInfo - from DB, contains limit info
- * @returns {{ cpu: { used, limit, usedMillicores, limitMillicores, percentage }, memory: { ... } }}
+ * @returns {{ cpu, memory, storage, network, available }}
  */
 async function getPodMetrics(podName, containerName, dockerInfo) {
   const normalizedMemLimit = normalizeMemoryUnit(dockerInfo.memory);
   const normalizedCpuLimit = normalizeCpuUnit(dockerInfo.cpu);
+  const diskLimitMi = parseDiskToMi(dockerInfo.disk || "1Gi");
   
+  // Fetch CPU/Memory from metrics-server + network concurrently
+  const [metricsResult, networkStats] = await Promise.allSettled([
+    metricsClient.getPodMetrics(NAMESPACE),
+    getPodNetworkStats(podName, NAMESPACE),
+  ]);
+
+  // Fetch pod status for ephemeral storage usage
+  let storageUsedMi = 0;
   try {
-    // Fetch current usage from metrics-server
-    const metricsResponse = await metricsClient.getPodMetrics(NAMESPACE);
-    const podMetrics = metricsResponse.items.find(
-      (item) => item.metadata.name === podName
-    );
-
-    if (!podMetrics) {
-      return {
-        cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
-        memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
-        available: false,
-        message: "Metrics not yet available (pod may have just started)",
-      };
+    const podList = await coreV1.listNamespacedPod({
+      namespace: NAMESPACE,
+      fieldSelector: `metadata.name=${podName}`,
+    });
+    const pod = podList.items?.[0];
+    const ephemeralUsage = pod?.status?.ephemeralContainerStatuses?.[0]
+      || pod?.status?.containerStatuses?.[0];
+    // K8s exposes ephemeralStorage in pod.status.containerStatuses[].allocatedResources
+    const allocResources = ephemeralUsage?.allocatedResources?.["ephemeral-storage"];
+    if (allocResources) {
+      storageUsedMi = parseDiskToMi(allocResources);
     }
+  } catch {
+    storageUsedMi = 0;
+  }
 
-    // Find the container metrics
-    const containerMetrics = podMetrics.containers?.find(
-      (c) => c.name === containerName
-    ) || podMetrics.containers?.[0];
+  const netStats = networkStats.status === "fulfilled" ? networkStats.value :
+    { rxBytes: 0, txBytes: 0, rxMB: 0, txMB: 0, rxPackets: 0, txPackets: 0, available: false };
 
-    const cpuUsed = containerMetrics?.usage?.cpu || "0";
-    const memUsed = containerMetrics?.usage?.memory || "0";
-
-    const cpuUsedMilli = parseCpuToMillicores(cpuUsed);
-    const cpuLimitMilli = parseCpuToMillicores(normalizedCpuLimit);
-    const memUsedMi = parseMemoryToMi(memUsed);
-    const memLimitMi = parseMemoryToMi(normalizedMemLimit);
-
-    return {
-      cpu: {
-        used: `${Math.round(cpuUsedMilli)}m`,
-        limit: normalizedCpuLimit,
-        usedMillicores: Math.round(cpuUsedMilli),
-        limitMillicores: cpuLimitMilli,
-        percentage: cpuLimitMilli > 0 ? Math.min(100, Math.round((cpuUsedMilli / cpuLimitMilli) * 100)) : 0,
-      },
-      memory: {
-        used: `${Math.round(memUsedMi)}Mi`,
-        limit: normalizedMemLimit,
-        usedMi: Math.round(memUsedMi),
-        limitMi: memLimitMi,
-        percentage: memLimitMi > 0 ? Math.min(100, Math.round((memUsedMi / memLimitMi) * 100)) : 0,
-      },
-      available: true,
-    };
-  } catch (err) {
-    // Only log once to avoid spamming every 5 seconds when metrics-server is unavailable
+  // Handle CPU/Memory metrics
+  if (metricsResult.status === "rejected") {
     if (!getPodMetrics._loggedError) {
-      console.warn("[containerService] Metrics server unavailable:", err.message.slice(0, 100));
-      console.warn("[containerService] (Suppressing further metrics errors — install metrics-server to enable live metrics)");
+      console.warn("[containerService] Metrics server unavailable:", metricsResult.reason?.message?.slice(0, 100));
+      console.warn("[containerService] (Suppressing further metrics errors)");
       getPodMetrics._loggedError = true;
     }
     return {
       cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
       memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
+      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      network: netStats,
       available: false,
       message: "Metrics server unavailable — install metrics-server addon",
     };
   }
+
+  const metricsResponse = metricsResult.value;
+  const podMetrics = metricsResponse.items.find((item) => item.metadata.name === podName);
+
+  if (!podMetrics) {
+    return {
+      cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
+      memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
+      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      network: netStats,
+      available: false,
+      message: "Metrics not yet available (pod may have just started)",
+    };
+  }
+
+  const containerMetrics = podMetrics.containers?.find((c) => c.name === containerName) || podMetrics.containers?.[0];
+
+  const cpuUsed = containerMetrics?.usage?.cpu || "0";
+  const memUsed = containerMetrics?.usage?.memory || "0";
+
+  const cpuUsedMilli = parseCpuToMillicores(cpuUsed);
+  const cpuLimitMilli = parseCpuToMillicores(normalizedCpuLimit);
+  const memUsedMi = parseMemoryToMi(memUsed);
+  const memLimitMi = parseMemoryToMi(normalizedMemLimit);
+
+  // Storage percentage (of quota/limit)
+  const storagePct = diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0;
+
+  return {
+    cpu: {
+      used: `${Math.round(cpuUsedMilli)}m`,
+      limit: normalizedCpuLimit,
+      usedMillicores: Math.round(cpuUsedMilli),
+      limitMillicores: cpuLimitMilli,
+      percentage: cpuLimitMilli > 0 ? Math.min(100, Math.round((cpuUsedMilli / cpuLimitMilli) * 100)) : 0,
+    },
+    memory: {
+      used: `${Math.round(memUsedMi)}Mi`,
+      limit: normalizedMemLimit,
+      usedMi: Math.round(memUsedMi),
+      limitMi: memLimitMi,
+      percentage: memLimitMi > 0 ? Math.min(100, Math.round((memUsedMi / memLimitMi) * 100)) : 0,
+    },
+    storage: {
+      used: `${storageUsedMi}Mi`,
+      limit: `${diskLimitMi}Mi`,
+      usedMi: storageUsedMi,
+      limitMi: diskLimitMi,
+      percentage: storagePct,
+    },
+    network: netStats,
+    available: true,
+  };
 }
+
 
 /* ================================================================== */
 /* 4. WEBSOCKET TERMINAL (K8s Exec)                                    */

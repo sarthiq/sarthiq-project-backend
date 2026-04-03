@@ -20,8 +20,23 @@ function parseMemoryToMi(mem) {
   return Math.round(parseInt(str) / (1024 * 1024));
 }
 
+function parseStorageToGi(raw) {
+  if (!raw) return 0;
+  const str = String(raw).trim();
+  if (/^\d+Ki$/i.test(str)) return parseFloat((parseInt(str) / (1024 * 1024)).toFixed(2));
+  if (/^\d+Mi$/i.test(str)) return parseFloat((parseInt(str) / 1024).toFixed(2));
+  if (/^\d+Gi$/i.test(str)) return parseFloat(str);
+  if (/^\d+Ti$/i.test(str)) return parseInt(str) * 1024;
+  // raw bytes
+  return parseFloat((parseInt(str) / (1024 * 1024 * 1024)).toFixed(2));
+}
+
 function formatCpu(raw) { return `${parseCpuToMillicores(raw)}m`; }
 function formatMem(raw) { return `${parseMemoryToMi(raw)}Mi`; }
+function formatStorage(raw) {
+  const gi = parseStorageToGi(raw);
+  return gi >= 1 ? `${gi.toFixed(1)}Gi` : `${Math.round(gi * 1024)}Mi`;
+}
 
 const SYSTEM_NAMESPACES = ["kube-system", "kube-public", "kube-node-lease", "ingress-nginx", "default", "cert-manager"];
 
@@ -39,10 +54,16 @@ exports.getAdminNodes = async (req, res) => {
       const allocMem = parseMemoryToMi(node.status?.allocatable?.memory);
       const usageCpu = parseCpuToMillicores(metric?.cpuUsage || "0");
       const usageMem = parseMemoryToMi(metric?.memUsage || "0");
-      const allocStorage = node.status?.allocatable?.["ephemeral-storage"] || "0";
+      const allocStorageRaw = node.status?.allocatable?.["ephemeral-storage"] || "0";
+      const capacityStorageRaw = node.status?.capacity?.["ephemeral-storage"] || "0";
+      const allocStorageGi = parseStorageToGi(allocStorageRaw);
+      const capacityStorageGi = parseStorageToGi(capacityStorageRaw);
       const capacityPods = parseInt(node.status?.allocatable?.pods || "110");
 
       const readyCondition = (node.status?.conditions || []).find(c => c.type === "Ready");
+      const pressureConditions = (node.status?.conditions || []).filter(
+        c => ["MemoryPressure", "DiskPressure", "PIDPressure"].includes(c.type) && c.status === "True"
+      ).map(c => c.type);
       const status = readyCondition?.status === "True" ? "Ready" : "NotReady";
 
       // Count pods on this node
@@ -51,14 +72,20 @@ exports.getAdminNodes = async (req, res) => {
       return {
         name: node.metadata.name,
         status,
+        pressures: pressureConditions,
         roles: Object.keys(node.metadata?.labels || {})
           .filter(l => l.startsWith("node-role.kubernetes.io/"))
           .map(l => l.replace("node-role.kubernetes.io/", "")),
         allocatable: {
           cpu: `${allocCpu}m`,
           memory: `${allocMem}Mi`,
-          storage: formatMem(allocStorage),
+          storage: formatStorage(allocStorageRaw),
+          storageGi: allocStorageGi,
           pods: capacityPods,
+        },
+        capacity: {
+          storage: formatStorage(capacityStorageRaw),
+          storageGi: capacityStorageGi,
         },
         usage: {
           cpu: `${usageCpu}m`,
@@ -67,6 +94,7 @@ exports.getAdminNodes = async (req, res) => {
         usagePercent: {
           cpu: allocCpu > 0 ? Math.min(100, Math.round((usageCpu / allocCpu) * 100)) : 0,
           memory: allocMem > 0 ? Math.min(100, Math.round((usageMem / allocMem) * 100)) : 0,
+          pods: capacityPods > 0 ? Math.round((nodePods.length / capacityPods) * 100) : 0,
         },
         podsCount: nodePods.length,
         osImage: node.status?.nodeInfo?.osImage || "N/A",
