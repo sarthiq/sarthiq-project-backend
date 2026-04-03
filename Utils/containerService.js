@@ -502,7 +502,18 @@ function initContainerWebSocket(server) {
 
           authenticated = true;
 
-          // Send session info
+          // Resource limits from dockerInfo for display banner
+          const memLimitMi = (() => {
+            const m = dockerInfo?.memory;
+            if (!m) return 512;
+            const s = String(m);
+            if (/^\d+m$/.test(s)) return parseInt(s);
+            if (s.endsWith("Mi")) return parseInt(s);
+            if (s.endsWith("Gi")) return parseInt(s) * 1024;
+            return 512;
+          })();
+
+          // Send session info with resource limits
           ws.send(JSON.stringify({
             type: "session_started",
             sessionId,
@@ -510,11 +521,23 @@ function initContainerWebSocket(server) {
             containerName,
             maxDurationMs: terminalManager.MAX_SESSION_DURATION_MS,
             idleTimeoutMs: terminalManager.IDLE_TIMEOUT_MS,
+            resourceLimits: {
+              cpu: dockerInfo?.cpu || "500m",
+              memory: dockerInfo?.memory || "512Mi",
+              disk: dockerInfo?.disk || "1Gi",
+              pidsLimit: dockerInfo?.pidsLimit || 100,
+            },
           }));
 
           // Attempt bash, fall back to sh
+          // Wrap in ulimit enforcement so shell sessions respect memory limits
+          const ulimitVKb = memLimitMi * 1024; // virtual memory in KB
           const shell = authData.shell || "/bin/sh";
-          await attachExecStream(ws, sessionId, podName, containerName, shell);
+          // Use sh -c to set ulimit before handing over the shell
+          // This prevents shell processes from exceeding the pod's memory limit
+          const shellCmd = "sh";
+          const shellArgs = ["-c", `ulimit -v ${ulimitVKb} 2>/dev/null || true; ulimit -u ${dockerInfo?.pidsLimit || 100} 2>/dev/null || true; exec ${shell}`];
+          await attachExecStream(ws, sessionId, podName, containerName, shellCmd, shellArgs);
 
         } catch (err) {
           console.error("[containerService] Terminal auth error:", err.message);
@@ -578,26 +601,12 @@ function initContainerWebSocket(server) {
 
 /**
  * Attach K8s exec stream to the client WebSocket.
+ * @param {shellArgs} optional args array for shell — allows wrapping with ulimit
  */
-async function attachExecStream(clientWs, sessionId, podName, containerName, shell) {
+async function attachExecStream(clientWs, sessionId, podName, containerName, shell, shellArgs = null) {
   try {
     const execInstance = new k8s.Exec(kc);
-
-    // Try the requested shell
-    const ws = await execInstance.exec(
-      NAMESPACE,
-      podName,
-      containerName,
-      [shell],
-      process.stdout, // placeholder — we'll override
-      process.stderr,
-      process.stdin,
-      true, // tty
-    );
-
-    // The k8s exec returns a WebSocket — pipe it to the client
-    // Actually, the k8s client-node exec API uses a different approach.
-    // Let's use the lower-level Attach/Exec API via WebSocket
+    const command = shellArgs ? [shell, ...shellArgs] : [shell];
 
     // Use the stream-based approach
     const streamPassThrough = new (require("stream").PassThrough)();
@@ -606,7 +615,7 @@ async function attachExecStream(clientWs, sessionId, podName, containerName, she
       NAMESPACE,
       podName,
       containerName,
-      [shell],
+      command,           // uses ulimit-wrapped command when shellArgs provided
       streamPassThrough, // stdout
       streamPassThrough, // stderr
       null,              // stdin (we'll manually write)

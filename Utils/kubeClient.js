@@ -114,40 +114,109 @@ function enforceResourceCap(requested, max, type) {
 /* ------------------------------------------------------------------ */
 /* Helper: ensure a Kubernetes namespace exists (create if missing)      */
 /* ------------------------------------------------------------------ */
-const _nsCache = new Set(); // avoid repeated API calls for the same NS
+const _nsCache = new Set();
+const _limitRangeApplied = new Set();
 
-async function ensureNamespace(ns) {
-  if (_nsCache.has(ns)) return; // already verified this session
+async function applyNamespaceLimitRange(ns) {
+  if (_limitRangeApplied.has(ns)) return;
+
+  const limitRangeName = "sarthiq-limits";
+  const limitRangeBody = {
+    apiVersion: "v1",
+    kind: "LimitRange",
+    metadata: { name: limitRangeName, namespace: ns },
+    spec: {
+      limits: [{
+        type: "Container",
+        max: { cpu: MAX_CPU_LIMIT, memory: MAX_MEMORY_LIMIT, "ephemeral-storage": "2Gi" },
+        default: { cpu: MAX_CPU_LIMIT, memory: MAX_MEMORY_LIMIT, "ephemeral-storage": "1Gi" },
+        defaultRequest: { cpu: "100m", memory: "128Mi", "ephemeral-storage": "128Mi" },
+        maxLimitRequestRatio: { cpu: "10" },
+      }],
+    },
+  };
 
   try {
-    await coreV1.readNamespace({ name: ns });
-    _nsCache.add(ns);
+    await coreV1.readNamespacedLimitRange({ name: limitRangeName, namespace: ns });
+    await coreV1.replaceNamespacedLimitRange({ name: limitRangeName, namespace: ns, body: limitRangeBody });
   } catch (err) {
-    // Namespace doesn't exist — create it
-    try {
-      console.log(`[kubeClient] Namespace '${ns}' not found. Creating...`);
-      await coreV1.createNamespace({
-        body: {
-          apiVersion: "v1",
-          kind: "Namespace",
-          metadata: { name: ns },
-        },
-      });
-      _nsCache.add(ns);
-      console.log(`[kubeClient] ✓ Namespace '${ns}' created successfully`);
-    } catch (createErr) {
-      // 409 = already exists (race condition with another worker)
-      if (createErr.statusCode === 409 || createErr?.body?.code === 409) {
-        _nsCache.add(ns);
-        return;
+    if (err.statusCode === 404 || err?.body?.code === 404) {
+      try {
+        await coreV1.createNamespacedLimitRange({ namespace: ns, body: limitRangeBody });
+        console.log(`[kubeClient] ✓ LimitRange applied to namespace '${ns}'`);
+      } catch (e) {
+        console.warn(`[kubeClient] ⚠ Could not create LimitRange in '${ns}':`, e.message);
       }
-      console.error(
-        `[kubeClient] ✗ Failed to create namespace '${ns}':`,
-        createErr.message,
-      );
-      throw createErr;
     }
   }
+
+  // ResourceQuota — aggregate cap across all pods in namespace
+  const quotaName = "sarthiq-quota";
+  const quotaBody = {
+    apiVersion: "v1",
+    kind: "ResourceQuota",
+    metadata: { name: quotaName, namespace: ns },
+    spec: {
+      hard: {
+        pods: "100",
+        "requests.cpu": "20000m",
+        "requests.memory": "20Gi",
+        "limits.cpu": "20000m",
+        "limits.memory": "20Gi",
+        "requests.ephemeral-storage": "100Gi",
+        "limits.ephemeral-storage": "200Gi",
+        "count/services": "100",
+        "count/ingresses.networking.k8s.io": "100",
+      },
+    },
+  };
+
+  try {
+    await coreV1.readNamespacedResourceQuota({ name: quotaName, namespace: ns });
+    await coreV1.replaceNamespacedResourceQuota({ name: quotaName, namespace: ns, body: quotaBody });
+  } catch (err) {
+    if (err.statusCode === 404 || err?.body?.code === 404) {
+      try {
+        await coreV1.createNamespacedResourceQuota({ namespace: ns, body: quotaBody });
+        console.log(`[kubeClient] ✓ ResourceQuota applied to namespace '${ns}'`);
+      } catch (e) {
+        console.warn(`[kubeClient] ⚠ Could not create ResourceQuota in '${ns}':`, e.message);
+      }
+    }
+  }
+
+  _limitRangeApplied.add(ns);
+}
+
+async function ensureNamespace(ns) {
+  // Always try to apply LimitRange (idempotent after first run)
+  const alreadyKnown = _nsCache.has(ns);
+
+  if (!alreadyKnown) {
+    try {
+      await coreV1.readNamespace({ name: ns });
+      _nsCache.add(ns);
+    } catch {
+      try {
+        console.log(`[kubeClient] Namespace '${ns}' not found. Creating...`);
+        await coreV1.createNamespace({
+          body: { apiVersion: "v1", kind: "Namespace", metadata: { name: ns } },
+        });
+        _nsCache.add(ns);
+        console.log(`[kubeClient] ✓ Namespace '${ns}' created successfully`);
+      } catch (createErr) {
+        if (createErr.statusCode === 409 || createErr?.body?.code === 409) {
+          _nsCache.add(ns);
+        } else {
+          console.error(`[kubeClient] ✗ Failed to create namespace '${ns}':`, createErr.message);
+          throw createErr;
+        }
+      }
+    }
+  }
+
+  // Apply limits (skipped if already done this session)
+  await applyNamespaceLimitRange(ns);
 }
 
 /* ------------------------------------------------------------------ */
@@ -161,6 +230,7 @@ async function createDeployment({
   memoryLimit,
   cpuRequest,
   memoryRequest,
+  diskLimit = "1Gi",
   envVars = {},
   nodeName, // kept for DB tracking but NO LONGER used for nodeSelector
   useConfigMap = false,
@@ -299,8 +369,16 @@ async function createDeployment({
               securityContext: defaultContainerSecurity,
 
               resources: {
-                limits: { cpu: enforcedCpuLimit, memory: enforcedMemLimit },
-                requests: { cpu: cpuRequest, memory: memoryRequest },
+                limits: {
+                  cpu: enforcedCpuLimit,
+                  memory: enforcedMemLimit,
+                  "ephemeral-storage": diskLimit || "1Gi",
+                },
+                requests: {
+                  cpu: cpuRequest || "100m",
+                  memory: memoryRequest || "128Mi",
+                  "ephemeral-storage": "128Mi",
+                },
               },
 
               // ── Startup probe: handles slow-starting containers ──
