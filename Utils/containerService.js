@@ -502,18 +502,7 @@ function initContainerWebSocket(server) {
 
           authenticated = true;
 
-          // Resource limits from dockerInfo for display banner
-          const memLimitMi = (() => {
-            const m = dockerInfo?.memory;
-            if (!m) return 512;
-            const s = String(m);
-            if (/^\d+m$/.test(s)) return parseInt(s);
-            if (s.endsWith("Mi")) return parseInt(s);
-            if (s.endsWith("Gi")) return parseInt(s) * 1024;
-            return 512;
-          })();
-
-          // Send session info with resource limits
+          // Send session info with generic limits (actual limits are enforced by Kubernetes)
           ws.send(JSON.stringify({
             type: "session_started",
             sessionId,
@@ -522,22 +511,16 @@ function initContainerWebSocket(server) {
             maxDurationMs: terminalManager.MAX_SESSION_DURATION_MS,
             idleTimeoutMs: terminalManager.IDLE_TIMEOUT_MS,
             resourceLimits: {
-              cpu: dockerInfo?.cpu || "500m",
-              memory: dockerInfo?.memory || "512Mi",
-              disk: dockerInfo?.disk || "1Gi",
-              pidsLimit: dockerInfo?.pidsLimit || 100,
+              cpu: "Governed by K8s",
+              memory: "Governed by K8s",
+              disk: "Governed by K8s",
+              pidsLimit: 100,
             },
           }));
 
           // Attempt bash, fall back to sh
-          // Wrap in ulimit enforcement so shell sessions respect memory limits
-          const ulimitVKb = memLimitMi * 1024; // virtual memory in KB
           const shell = authData.shell || "/bin/sh";
-          // Use sh -c to set ulimit before handing over the shell
-          // This prevents shell processes from exceeding the pod's memory limit
-          const shellCmd = "sh";
-          const shellArgs = ["-c", `ulimit -v ${ulimitVKb} 2>/dev/null || true; ulimit -u ${dockerInfo?.pidsLimit || 100} 2>/dev/null || true; exec ${shell}`];
-          await attachExecStream(ws, sessionId, podName, containerName, shellCmd, shellArgs);
+          await attachExecStream(ws, sessionId, podName, containerName, shell);
 
         } catch (err) {
           console.error("[containerService] Terminal auth error:", err.message);
@@ -599,125 +582,139 @@ function initContainerWebSocket(server) {
   });
 }
 
-/**
- * Attach K8s exec stream to the client WebSocket.
- * @param {shellArgs} optional args array for shell — allows wrapping with ulimit
- */
-async function attachExecStream(clientWs, sessionId, podName, containerName, shell, shellArgs = null) {
+async function attachExecStream(clientWs, sessionId, podName, containerName, shell) {
   try {
     const execInstance = new k8s.Exec(kc);
-    const command = shellArgs ? [shell, ...shellArgs] : [shell];
+    const { PassThrough } = require("stream");
 
-    // Use the stream-based approach
-    const streamPassThrough = new (require("stream").PassThrough)();
+    const launchCmd = [
+      "/bin/sh", "-c",
+      `export PS1='\\u@\\h:\\w\\$ '; export TERM=xterm; ` +
+      `if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh; fi`
+    ];
+
+    // These PassThrough streams are used by @kubernetes/client-node to pipe
+    // data to/from the K8s exec WebSocket. Test confirmed they work with tty=true.
+    const outStream = new PassThrough();
+    const errStream = new PassThrough();
+    const inStream  = new PassThrough();
 
     const execWs = await execInstance.exec(
       NAMESPACE,
       podName,
       containerName,
-      command,           // uses ulimit-wrapped command when shellArgs provided
-      streamPassThrough, // stdout
-      streamPassThrough, // stderr
-      null,              // stdin (we'll manually write)
-      true,              // tty
+      launchCmd,
+      outStream,   // stdout
+      errStream,   // stderr
+      inStream,    // stdin
+      true,        // tty
     );
 
-    // Pipe K8s exec output → client WebSocket
-    streamPassThrough.on("data", (data) => {
-      if (clientWs.readyState === 1) { // OPEN
-        clientWs.send(JSON.stringify({
-          type: "output",
-          data: data.toString(),
-        }));
-      }
-    });
+    if (!execWs) throw new Error("K8s exec returned no WebSocket");
+    console.log(`[containerService] Shell connected to ${podName}, execWs.readyState=${execWs.readyState}`);
 
-    streamPassThrough.on("error", (err) => {
-      console.error("[containerService] Exec stream error:", err.message);
+    // ── STDOUT → client ──────────────────────────────────────────────
+    outStream.on("data", (chunk) => {
       if (clientWs.readyState === 1) {
-        clientWs.send(JSON.stringify({
-          type: "error",
-          message: "Shell connection lost",
-        }));
+        clientWs.send(JSON.stringify({ type: "output", data: chunk.toString("utf-8") }));
       }
     });
 
-    // Store stdin writer reference on the session
-    // When client sends input, we need to write to the exec stdin
-    const stdinStream = new (require("stream").PassThrough)();
+    // ── STDERR → client (same output channel) ────────────────────────
+    errStream.on("data", (chunk) => {
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "output", data: chunk.toString("utf-8") }));
+      }
+    });
 
-    // Override the client ws message handler to pipe stdin
+    // ── Exec WS close/error ──────────────────────────────────────────
+    execWs.on("close", () => {
+      console.log(`[containerService] Shell exited for ${podName}`);
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "session_ended", message: "Shell process exited" }));
+      }
+      terminalManager.terminateSession(sessionId, "shell_exited");
+    });
+
+    execWs.on("error", (err) => {
+      console.error("[containerService] execWs error:", err.message);
+    });
+
+    // ── Send initial resize via raw frame (channel 4) ────────────────
+    // This must be a raw binary frame since there's no stream for resize
+    setTimeout(() => {
+      if (execWs.readyState === 1) {
+        const payload = Buffer.from(JSON.stringify({ Width: 220, Height: 50 }), "utf-8");
+        const frame = Buffer.alloc(payload.length + 1);
+        frame[0] = 4; // channel 4 = resize
+        payload.copy(frame, 1);
+        execWs.send(frame);
+      }
+    }, 200);
+
+    // ── Replace client WS message handler to forward input ───────────
     clientWs.removeAllListeners("message");
     clientWs.on("message", (rawMessage) => {
-      const message = rawMessage.toString();
-
+      let parsed;
       try {
-        const parsed = JSON.parse(message);
-
-        if (parsed.type === "input") {
-          // Check for suspicious commands
-          const suspiciousCheck = terminalManager.checkSuspiciousInput(parsed.data);
-          if (suspiciousCheck.suspicious) {
-            clientWs.send(JSON.stringify({
-              type: "warning",
-              message: `⚠ Suspicious command pattern: ${suspiciousCheck.match}`,
-            }));
-          }
-
-          terminalManager.recordActivity(sessionId);
-
-          // Write to K8s exec stdin
-          if (stdinStream.writable) {
-            stdinStream.write(parsed.data);
-          }
-        } else if (parsed.type === "resize") {
-          // Terminal resize — k8s exec supports this via status channel
-          // For now, handled client-side by xterm.js fit addon
-        } else if (parsed.type === "ping") {
-          clientWs.send(JSON.stringify({ type: "pong" }));
-          terminalManager.recordActivity(sessionId);
-        }
+        parsed = JSON.parse(rawMessage.toString());
       } catch {
-        // Raw string input (non-JSON) — treat as stdin
+        // Non-JSON raw data → treat as stdin
         terminalManager.recordActivity(sessionId);
-        if (stdinStream.writable) {
-          stdinStream.write(message);
+        inStream.write(rawMessage.toString());
+        return;
+      }
+
+      if (parsed.type === "input") {
+        const check = terminalManager.checkSuspiciousInput(parsed.data);
+        if (check.suspicious) {
+          clientWs.send(JSON.stringify({
+            type: "warning",
+            message: `⚠ Suspicious pattern blocked: ${check.match}`,
+          }));
+          return;
         }
+        terminalManager.recordActivity(sessionId);
+        // Write to stdin PassThrough → K8s exec → container shell
+        inStream.write(parsed.data);
+
+      } else if (parsed.type === "resize") {
+        if (typeof parsed.cols === "number" && typeof parsed.rows === "number" && execWs.readyState === 1) {
+          const payload = Buffer.from(JSON.stringify({ Width: parsed.cols, Height: parsed.rows }), "utf-8");
+          const frame = Buffer.alloc(payload.length + 1);
+          frame[0] = 4; // channel 4 = resize
+          payload.copy(frame, 1);
+          execWs.send(frame);
+        }
+
+      } else if (parsed.type === "ping") {
+        terminalManager.recordActivity(sessionId);
+        clientWs.send(JSON.stringify({ type: "pong" }));
       }
     });
 
-    // Re-run exec with proper stdin
-    // The k8s client-node Exec API in v1.x works differently:
-    // We need to use the WebSocket-based approach
-    // Let's create a clean exec connection
-
+    // ── MOTD ─────────────────────────────────────────────────────────
+    const now = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     clientWs.send(JSON.stringify({
       type: "output",
-      data: `\r\n\x1b[32m✓ Connected to ${podName}\x1b[0m\r\n\x1b[90mShell: ${shell} | Session timeout: 10 min | Idle timeout: 3 min\x1b[0m\r\n\r\n`,
+      data:
+        `\r\n\x1b[1;36m╔══════════════════════════════════════════╗\x1b[0m\r\n` +
+        `\x1b[1;36m║     SarthiQ Interactive Shell            ║\x1b[0m\r\n` +
+        `\x1b[1;36m╚══════════════════════════════════════════╝\x1b[0m\r\n` +
+        `\r\n` +
+        `\x1b[90m  Container : \x1b[97m${containerName}\x1b[0m\r\n` +
+        `\x1b[90m  Pod       : \x1b[97m${podName}\x1b[0m\r\n` +
+        `\x1b[90m  Connected : \x1b[97m${now}\x1b[0m\r\n` +
+        `\x1b[90m  Limit     : \x1b[97m10 min (idle: 3 min)\x1b[0m\r\n` +
+        `\r\n`,
     }));
 
   } catch (err) {
     console.error("[containerService] Exec attach error:", err.message);
-
-    // If bash fails, try sh
-    if (shell === "/bin/bash") {
-      clientWs.send(JSON.stringify({
-        type: "output",
-        data: "\x1b[33m⚠ bash not available, falling back to sh...\x1b[0m\r\n",
-      }));
-      try {
-        await attachExecStream(clientWs, sessionId, podName, containerName, "/bin/sh");
-        return;
-      } catch {
-        // Both failed
-      }
+    if (clientWs.readyState === 1) {
+      clientWs.send(JSON.stringify({ type: "error", message: `Failed to start shell: ${err.message}` }));
+      clientWs.close(1011, "Exec failed");
     }
-
-    clientWs.send(JSON.stringify({
-      type: "error",
-      message: `Failed to connect shell: ${err.message}`,
-    }));
-    clientWs.close(1011, "Exec failed");
     terminalManager.terminateSession(sessionId, "user_closed");
   }
 }
