@@ -678,7 +678,35 @@ const deployWorker = new Worker(
       jobRecord.completedAt = new Date();
       await jobRecord.save();
 
-      throw err; // allow BullMQ retry
+      // ── Mark infrastructure errors as unrecoverable ──
+      // BullMQ will NOT retry these (they won't self-heal).
+      // Prevents: deploy → fail(CNI) → retry → fail(CNI) → log spam
+      const infraPatterns = [
+        "CNI is misconfigured",
+        "missing loopback plugin",
+        "Pre-flight cluster check failed",
+        "No active, schedulable Kubernetes nodes",
+        "All cluster nodes are at capacity",
+        "Cannot reach Kubernetes cluster",
+        "node(s) are NotReady",
+        "No worker nodes available",
+        "cannot be used for student projects",
+      ];
+      const isInfraError = infraPatterns.some((p) =>
+        err.message.includes(p)
+      );
+      if (isInfraError) {
+        await appendLog(
+          jobRecord,
+          "ℹ️ This is an infrastructure error (not an application issue). " +
+            "Auto-retry is disabled. Fix the cluster and re-deploy manually."
+        );
+        // Throw UnrecoverableError to prevent BullMQ retry
+        const { UnrecoverableError } = require("bullmq");
+        throw new UnrecoverableError(err.message);
+      }
+
+      throw err; // allow BullMQ retry for non-infra errors
     }
   },
   {

@@ -25,6 +25,19 @@ const kc = new k8s.KubeConfig();
 kc.loadFromDefault();
 const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
+// ── ARCHITECTURE NOTE ──────────────────────────────────────────
+// Master server (control-plane) = runs ONLY sarthiq backend + frontend
+// Worker nodes (node servers)   = run ONLY student/user projects
+// The master server must NEVER be used to deploy student projects.
+// If no worker nodes exist, deployments must FAIL, not fall back to master.
+// ───────────────────────────────────────────────────────────────
+
+// In production, NEVER schedule student projects on the control-plane.
+// Set ALLOW_CONTROL_PLANE_SCHEDULING=true ONLY for local dev (minikube/kind).
+const ALLOW_CONTROL_PLANE_SCHEDULING =
+  process.env.ALLOW_CONTROL_PLANE_SCHEDULING === "true" ||
+  process.env.NODE_ENV !== "production";
+
 // Resource cost per FREE-TIER container (must match tierConfig defaults)
 const FREE_TIER_CPU_MILLICORES = 500; // 0.5 vCPU = 500m
 const FREE_TIER_MEMORY_MI = 512; // 512 MiB
@@ -114,15 +127,28 @@ async function discoverAndSyncNodes() {
       const controlPlane = isControlPlaneNode(node);
       const hasTaints = hasBlockingTaints(node);
 
-      // For single-node clusters (minikube, kind, single-node prod),
-      // the control-plane IS the only node — we MUST schedule on it
+      // ── CRITICAL: Control-plane = master server = NOT for student projects ──
+      // In production, the master server runs only the SarthiQ backend/frontend.
+      // Student projects MUST deploy on dedicated worker nodes.
+      // Only allow control-plane scheduling in dev environments (minikube/kind).
       let schedulable = ready;
-      if (hasTaints && !isSingleNode) {
-        // Multi-node cluster: skip tainted nodes (they're intentionally restricted)
+      if (controlPlane && !ALLOW_CONTROL_PLANE_SCHEDULING) {
+        // PRODUCTION: Never schedule student projects on the master server
         schedulable = false;
+        console.log(
+          `[nodeManager] ⛔ Node '${nodeName}' is the control-plane (master server). ` +
+            `Student projects cannot be deployed here. Skipping.`
+        );
+      } else if (hasTaints && !controlPlane) {
+        // Non-control-plane nodes with taints (e.g., maintenance mode)
+        schedulable = false;
+      } else if (controlPlane && hasTaints && ALLOW_CONTROL_PLANE_SCHEDULING) {
+        // DEV ONLY: allow scheduling on control-plane (minikube/kind)
+        schedulable = ready;
+        console.log(
+          `[nodeManager] ⚠ DEV MODE: Allowing scheduling on control-plane '${nodeName}'`
+        );
       }
-      // Single-node cluster: allow scheduling even if tainted
-      // (The deployment will need tolerations — handled in kubeClient.js)
 
       // Upsert to DB
       const [dbNode] = await KubeNode.upsert({
@@ -198,8 +224,28 @@ async function preflightClusterCheck() {
   }
 
   const schedulableNodes = discovered.filter((n) => n.schedulable);
+
+  // ── CRITICAL CHECK: Are there any WORKER nodes (non-control-plane)? ──
+  // The master server must NEVER run student projects.
+  // If only the control-plane exists, reject the deployment.
+  const workerNodes = schedulableNodes.filter((n) => !n.controlPlane);
+  const controlPlaneNodes = discovered.filter((n) => n.controlPlane);
+
   if (schedulableNodes.length === 0) {
-    // All nodes have blocking taints in a multi-node cluster
+    // Check if it's because only control-plane exists
+    if (controlPlaneNodes.length > 0 && !ALLOW_CONTROL_PLANE_SCHEDULING) {
+      return {
+        ok: false,
+        reason:
+          "No worker nodes available for deployment. " +
+          "The master server (control-plane) cannot be used for student projects. " +
+          "Please add a worker node to the cluster or renew the expired node server.",
+        nodes: discovered,
+        isSingleNode: discovered.length === 1,
+        controlPlaneOnly: true,
+      };
+    }
+
     return {
       ok: false,
       reason:
@@ -210,9 +256,24 @@ async function preflightClusterCheck() {
     };
   }
 
+  // In production, ensure we have actual worker nodes, not just control-plane
+  if (workerNodes.length === 0 && !ALLOW_CONTROL_PLANE_SCHEDULING) {
+    return {
+      ok: false,
+      reason:
+        "No worker nodes available for deployment. " +
+        "Only the master server (control-plane) was found, but student projects " +
+        "can only run on dedicated worker nodes. " +
+        "Please add a worker node or renew the expired node server.",
+      nodes: discovered,
+      isSingleNode: discovered.length === 1,
+      controlPlaneOnly: true,
+    };
+  }
+
   const isSingleNode = discovered.length === 1;
   const controlPlaneOnly =
-    isSingleNode && discovered[0].controlPlane && discovered[0].hasTaints;
+    isSingleNode && discovered[0].controlPlane;
 
   return {
     ok: true,
