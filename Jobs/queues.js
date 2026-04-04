@@ -47,4 +47,15 @@ const sleepCheckQueue = new Queue("sleepCheckQueue", {
   },
 });
 
-module.exports = { deployQueue, wakeQueue, sleepCheckQueue, connection };
+/** Queue for provisioning infrastructure services (DB, cache, etc.) */
+const serviceQueue = new Queue("serviceQueue", {
+  connection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: { type: "exponential", delay: 10000 },
+    removeOnComplete: { count: 200 },
+    removeOnFail: { count: 50 },
+  },
+});
+
+module.exports = { deployQueue, wakeQueue, sleepCheckQueue, serviceQueue, connection };

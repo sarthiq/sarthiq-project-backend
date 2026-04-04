@@ -227,6 +227,7 @@ async function bootstrap() {
   // ── Start BullMQ workers ──────────────────────────────────────
   require("./Jobs/deployWorker");
   require("./Jobs/wakeWorker");
+  require("./Jobs/serviceProvisionWorker");
   const { startSleepWatcherCron } = require("./Jobs/sleepWatcher");
   const { startCleanupCron } = require("./Jobs/cleanupCron");
 
@@ -235,6 +236,16 @@ async function bootstrap() {
   );
   startCleanupCron();
   console.log("[bootstrap] BullMQ workers & cron jobs started");
+
+  // ── Seed PaaS catalog & plans (idempotent) ──────────────────────
+  try {
+    const { seedServiceCatalog } = require("./Seeds/seedServiceCatalog");
+    const { seedUserPlans } = require("./Seeds/seedUserPlans");
+    await seedServiceCatalog();
+    await seedUserPlans();
+  } catch (seedErr) {
+    console.error("[bootstrap] ⚠ Seed failed (non-fatal):", seedErr.message);
+  }
 
   const server = new ApolloServer({
     typeDefs,
