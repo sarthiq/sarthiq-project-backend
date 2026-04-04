@@ -14,6 +14,7 @@
  *   5. Update DB status → 'running'
  */
 const { Worker } = require("bullmq");
+const { Op } = require("sequelize");
 const { connection } = require("./queues");
 const { deployQueue } = require("./queues");
 const DockerInfo = require("../Models/Projects/dockerInfo");
@@ -100,7 +101,41 @@ const wakeWorker = new Worker(
           (scaleErr.message && scaleErr.message.includes("not found"));
 
         if (is404) {
-          logLine(`⚠ K8s Deployment not found. Falling back to full redeploy...`);
+          logLine(`⚠ K8s Deployment not found. Checking recent failures before re-deploy...`);
+
+          // ── Circuit breaker: Don't re-deploy if we failed recently ──
+          // This prevents an infinite loop when infra is broken:
+          //   wake → 404 → re-deploy → fail → wake → 404 → re-deploy ...
+          const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+          const recentFailure = await DeploymentJob.findOne({
+            where: {
+              ProjectId: project.id,
+              status: 'failed',
+              completedAt: { [Op.gt]: new Date(Date.now() - COOLDOWN_MS) },
+            },
+            order: [['completedAt', 'DESC']],
+          });
+
+          if (recentFailure) {
+            logLine(
+              `⚠ Skipping re-deploy: project failed ${Math.round((Date.now() - recentFailure.completedAt) / 60000)} min ago. ` +
+              `Error was: ${(recentFailure.errorMessage || 'unknown').slice(0, 100)}. ` +
+              `Will retry after cooldown (${COOLDOWN_MS / 60000} min).`
+            );
+            dockerInfo.status = "failed";
+            await dockerInfo.save();
+
+            if (jobRecord) {
+              jobRecord.status = "failed";
+              jobRecord.errorMessage = `Wake skipped: recent deploy failure (cooldown ${COOLDOWN_MS / 60000} min)`;
+              jobRecord.completedAt = new Date();
+              await jobRecord.save();
+            }
+
+            return { skipped: true, reason: 'recent_failure', subdomain: project.subdomain };
+          }
+
+          logLine(`No recent failures. Proceeding with full re-deploy...`);
 
           // Reset status so deploy worker can pick it up
           dockerInfo.status = "queued";

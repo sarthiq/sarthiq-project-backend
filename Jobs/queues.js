@@ -20,8 +20,8 @@ connection.on("error", (err) => console.error("[Redis] Error:", err.message));
 const deployQueue = new Queue("deployQueue", {
   connection,
   defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: "exponential", delay: 5000 },
+    attempts: 1,             // Don't retry infra failures — they won't self-heal
+    backoff: { type: "exponential", delay: 30000 },
     removeOnComplete: { count: 100 },
     removeOnFail: { count: 50 },
   },
