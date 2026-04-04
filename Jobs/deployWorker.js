@@ -689,6 +689,8 @@ const deployWorker = new Worker(
         "All cluster nodes are at capacity",
         "Cannot reach Kubernetes cluster",
         "node(s) are NotReady",
+        "No worker nodes available",
+        "cannot be used for student projects",
       ];
       const isInfraError = infraPatterns.some((p) =>
         err.message.includes(p)
