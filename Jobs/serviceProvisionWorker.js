@@ -47,7 +47,6 @@ const {
   NAMESPACE,
 } = require("../Utils/kubeClient");
 
-const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
 const isProd = process.env.NODE_ENV === "production";
 
 const k8s = require("@kubernetes/client-node");
@@ -311,9 +310,9 @@ const serviceProvisionWorker = new Worker(
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
       const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
-      // External host: svc-mysql-2.svc.localhost (dev) or svc-mysql-2.svc.sarthiq.in (prod)
-      const externalDomain = isProd ? `svc.${PROJECT_DOMAIN}` : "svc.localhost";
-      const externalHost = `${kubeResName}.${externalDomain}`;
+      // TCP services (MySQL, Redis, etc.) can't use subdomain routing like HTTP.
+      // The NodePort number is what distinguishes them. localhost is correct.
+      const externalHost = "localhost";
       const connDetails = buildConnectionDetails(
         catalog.name,
         credentials,
