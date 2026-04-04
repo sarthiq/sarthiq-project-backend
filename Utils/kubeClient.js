@@ -830,12 +830,26 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
   let earlyExitChecked = false;
 
   while (Date.now() - start < timeoutMs) {
-    // Check deployment status
+    // Check deployment status first, then StatefulSet
+    let readyReplicas = 0;
+
     const dep = await appsV1
       .readNamespacedDeployment({ name: label, namespace: targetNamespace })
       .catch(() => null);
 
-    if (dep && dep.status?.readyReplicas >= 1) {
+    if (dep) {
+      readyReplicas = dep.status?.readyReplicas || 0;
+    } else {
+      // Fallback: check if it's a StatefulSet
+      const sts = await appsV1
+        .readNamespacedStatefulSet({ name: label, namespace: targetNamespace })
+        .catch(() => null);
+      if (sts) {
+        readyReplicas = sts.status?.readyReplicas || 0;
+      }
+    }
+
+    if (readyReplicas >= 1) {
       return true; // ✅ Pod is ready!
     }
 
