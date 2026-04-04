@@ -75,7 +75,7 @@ async function getUserPlan(userId) {
       maxCpuMillicores: 1000,
       maxMemoryMi: 1024,
       maxStorageGi: 5,
-      allowedServices: ["postgresql", "redis", "meilisearch"],
+      allowedServices: ["*"],
       maxCronJobs: 2,
       logRetentionHours: 24,
     };

@@ -45,7 +45,7 @@ const UserPlan = sequelize.define(
     allowedServices: {
       type: DataTypes.JSON,
       allowNull: false,
-      defaultValue: ["postgresql", "redis", "meilisearch"],
+      defaultValue: ["*"],
       comment: 'Array of allowed service names, or ["*"] for all',
     },
     maxCronJobs: {

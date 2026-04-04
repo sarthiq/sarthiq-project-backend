@@ -17,7 +17,7 @@ const PLAN_ENTRIES = [
     maxCpuMillicores: 1000,   // 1 vCPU total
     maxMemoryMi: 1024,        // 1 GiB total
     maxStorageGi: 5,          // 5 GiB total
-    allowedServices: ["postgresql", "redis", "meilisearch"],
+    allowedServices: ["*"],   // All services available on free tier
     maxCronJobs: 2,
     logRetentionHours: 24,
   },
@@ -51,7 +51,7 @@ async function seedUserPlans() {
   let skipped = 0;
 
   for (const entry of PLAN_ENTRIES) {
-    const [, wasCreated] = await UserPlan.findOrCreate({
+    const [plan, wasCreated] = await UserPlan.findOrCreate({
       where: { name: entry.name },
       defaults: entry,
     });
@@ -59,12 +59,14 @@ async function seedUserPlans() {
     if (wasCreated) {
       created++;
     } else {
+      // Update existing plan with latest values
+      await plan.update(entry);
       skipped++;
     }
   }
 
   console.log(
-    `[seedUserPlans] Done: ${created} created, ${skipped} already existed (${PLAN_ENTRIES.length} total)`
+    `[seedUserPlans] Done: ${created} created, ${skipped} updated (${PLAN_ENTRIES.length} total)`
   );
 }
 
