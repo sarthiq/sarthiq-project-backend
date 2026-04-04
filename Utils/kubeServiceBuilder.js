@@ -65,6 +65,27 @@ function buildClusterIPService(name, namespace, port, targetPort, labels) {
   };
 }
 
+/**
+ * Build a NodePort Service for external access to a service.
+ * K8s auto-assigns a port in the 30000-32767 range.
+ */
+function buildNodePortService(name, namespace, port, targetPort, labels) {
+  return {
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: {
+      name: `${name}-external`,
+      namespace,
+      labels: { ...labels, "sarthiq.com/access": "external" },
+    },
+    spec: {
+      selector: { app: name },
+      ports: [{ protocol: "TCP", port, targetPort, name: "external" }],
+      type: "NodePort",
+    },
+  };
+}
+
 function buildSecret(name, namespace, stringData, labels = {}) {
   return {
     apiVersion: "v1",
@@ -235,18 +256,21 @@ function buildMySQLResources({ instanceId, namespace, credentials, resources, pr
               image: "mysql:8.0",
               port: 3306,
               envFrom: [{ secretRef: { name: `${name}-secret` } }],
+              // Force mysql_native_password — caching_sha2_password requires TLS
+              // for non-localhost connections (which breaks NodePort access)
+              args: ["--default-authentication-plugin=mysql_native_password"],
               volumeMounts: [
                 { name: "data", mountPath: "/var/lib/mysql" },
               ],
               resources,
               readinessProbe: {
-                exec: { command: ["mysqladmin", "ping", "-h", "localhost", `-u${credentials.username}`, `-p${credentials.password}`] },
+                exec: { command: ["mysqladmin", "ping", "-h", "localhost", "-uroot", `-p${credentials.password}`] },
                 initialDelaySeconds: 10,
                 periodSeconds: 10,
                 timeoutSeconds: 5,
               },
               livenessProbe: {
-                exec: { command: ["mysqladmin", "ping", "-h", "localhost", `-u${credentials.username}`, `-p${credentials.password}`] },
+                exec: { command: ["mysqladmin", "ping", "-h", "localhost", "-uroot", `-p${credentials.password}`] },
                 initialDelaySeconds: 30,
                 periodSeconds: 20,
                 timeoutSeconds: 5,
@@ -864,6 +888,7 @@ module.exports = {
   buildCronJobResources,
   buildPVC,
   buildClusterIPService,
+  buildNodePortService,
   buildSecret,
   buildConfigMap,
   resourceName,

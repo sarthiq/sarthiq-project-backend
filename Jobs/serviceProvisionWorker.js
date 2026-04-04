@@ -36,7 +36,9 @@ const {
 
 const {
   buildServiceResources,
+  buildNodePortService,
   resourceName,
+  standardLabels,
 } = require("../Utils/kubeServiceBuilder");
 
 const {
@@ -44,6 +46,9 @@ const {
   waitForReady,
   NAMESPACE,
 } = require("../Utils/kubeClient");
+
+const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
+const isProd = process.env.NODE_ENV === "production";
 
 const k8s = require("@kubernetes/client-node");
 const kc = new k8s.KubeConfig();
@@ -267,6 +272,32 @@ const serviceProvisionWorker = new Worker(
         await appendLog(instance, "  → ClusterIP Service created");
       }
 
+      /* ── Step 5e (cont): Create NodePort for external access ──────── */
+      const nodePortSpec = buildNodePortService(
+        kubeResName,
+        instance.namespace,
+        catalog.defaultPort,
+        catalog.defaultPort,
+        standardLabels(instance.id, catalog.name, instance.ProjectId),
+      );
+      await applyResource("Service", nodePortSpec, instance.namespace);
+      await appendLog(instance, "  → NodePort Service created (external access)");
+
+      // Read back the auto-assigned NodePort
+      let externalPort = null;
+      try {
+        const npSvc = await coreV1.readNamespacedService({
+          name: `${kubeResName}-external`,
+          namespace: instance.namespace,
+        });
+        externalPort = npSvc?.spec?.ports?.[0]?.nodePort || null;
+        if (externalPort) {
+          await appendLog(instance, `  → External port: ${externalPort}`);
+        }
+      } catch {
+        await appendLog(instance, "  ⚠ Could not read NodePort (non-fatal)");
+      }
+
       /* ── Step 6: Wait for readiness ────────────────────────────── */
       await appendLog(instance, "  → Waiting for pod readiness (timeout: 120s)...");
 
@@ -280,18 +311,26 @@ const serviceProvisionWorker = new Worker(
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
       const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
+      // External host: svc-mysql-2.svc.localhost (dev) or svc-mysql-2.svc.sarthiq.in (prod)
+      const externalDomain = isProd ? `svc.${PROJECT_DOMAIN}` : "svc.localhost";
+      const externalHost = `${kubeResName}.${externalDomain}`;
       const connDetails = buildConnectionDetails(
         catalog.name,
         credentials,
         internalHost,
-        catalog.defaultPort
+        catalog.defaultPort,
+        externalPort ? externalHost : null,
+        externalPort,
       );
 
       instance.connectionDetails = encrypt(JSON.stringify(connDetails));
       instance.status = "running";
       await instance.save();
 
-      await appendLog(instance, `  → Connection: ${internalHost}:${catalog.defaultPort}`);
+      await appendLog(instance, `  → Internal: ${internalHost}:${catalog.defaultPort}`);
+      if (externalPort) {
+        await appendLog(instance, `  → External: ${externalHost}:${externalPort}`);
+      }
 
       /* ── Step 8: Auto-inject env vars ──────────────────────────── */
       await appendLog(instance, "  → Auto-injecting environment variables...");

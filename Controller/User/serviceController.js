@@ -174,9 +174,14 @@ exports.deleteService = async (req, res) => {
           )
           .catch(() => {});
 
-        // Delete Service
+        // Delete Service (ClusterIP)
         await coreV1
           .deleteNamespacedService({ name: kubeResName, namespace })
+          .catch(() => {});
+
+        // Delete NodePort Service (external access)
+        await coreV1
+          .deleteNamespacedService({ name: `${kubeResName}-external`, namespace })
           .catch(() => {});
 
         // Delete Secret

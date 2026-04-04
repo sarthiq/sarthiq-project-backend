@@ -226,15 +226,24 @@ function buildConnectionUri(serviceType, credentials, host, port) {
  * Build the full connection details object for a service.
  * This gets encrypted and stored in ServiceInstance.connectionDetails.
  */
-function buildConnectionDetails(serviceType, credentials, host, port) {
+function buildConnectionDetails(serviceType, credentials, host, port, externalHost, externalPort) {
   const uri = buildConnectionUri(serviceType, credentials, host, port);
 
-  return {
+  const details = {
     host,
     port,
     uri,
     ...credentials,
   };
+
+  // Add external connection info if available (NodePort access)
+  if (externalHost && externalPort) {
+    details.externalHost = externalHost;
+    details.externalPort = externalPort;
+    details.externalUri = buildConnectionUri(serviceType, credentials, externalHost, externalPort);
+  }
+
+  return details;
 }
 
 /**
