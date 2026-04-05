@@ -326,7 +326,8 @@ const serviceProvisionWorker = new Worker(
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
       const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
-      const externalHost = "localhost";
+      const domain = isProd ? (process.env.PROJECT_DOMAIN || "sarthiq.in") : "localhost";
+      const externalHost = `${kubeResName}.svc.${domain}`;
 
       // Primary external port (first port in the map)
       const primaryPortName = servicePorts[0].name;
