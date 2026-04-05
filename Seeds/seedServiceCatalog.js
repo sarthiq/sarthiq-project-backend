@@ -81,7 +81,7 @@ const CATALOG_ENTRIES = [
     category: "database",
     dockerImage: "mongo:7",
     defaultPort: 27017,
-    requiredResources: { cpu: "250m", memory: "256Mi", storage: "1Gi" },
+    requiredResources: { cpu: "250m", memory: "512Mi", storage: "1Gi" },
     configSchema: {},
     volumeMounts: [{ mountPath: "/data/db" }],
     healthCheck: {
@@ -90,7 +90,7 @@ const CATALOG_ENTRIES = [
       timeout: 5,
     },
     templates: {
-      small: { cpu: "250m", memory: "256Mi", storage: "1Gi" },
+      small: { cpu: "250m", memory: "512Mi", storage: "1Gi" },
     },
     envVarMapping: {
       MONGODB_URI: "uri",
@@ -155,7 +155,7 @@ const CATALOG_ENTRIES = [
       timeout: 10,
     },
     templates: {
-      small: { cpu: "250m", memory: "256Mi", storage: "512Mi" },
+      small: { cpu: "250m", memory: "384Mi", storage: "512Mi" },
     },
     envVarMapping: {
       RABBITMQ_URL: "uri",
@@ -264,7 +264,7 @@ const CATALOG_ENTRIES = [
       timeout: 10,
     },
     templates: {
-      small: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
+      small: { cpu: "500m", memory: "768Mi", storage: "2Gi" },
     },
     envVarMapping: {
       ELASTICSEARCH_URL: "uri",
