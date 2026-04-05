@@ -67,9 +67,13 @@ function buildClusterIPService(name, namespace, port, targetPort, labels) {
 
 /**
  * Build a NodePort Service for external access to a service.
- * K8s auto-assigns a port in the 30000-32767 range.
+ * K8s auto-assigns ports in the 30000-32767 range.
+ * @param {string} name
+ * @param {string} namespace
+ * @param {Array<{name: string, port: number, targetPort: number}>} ports
+ * @param {object} labels
  */
-function buildNodePortService(name, namespace, port, targetPort, labels) {
+function buildNodePortService(name, namespace, ports, labels) {
   return {
     apiVersion: "v1",
     kind: "Service",
@@ -80,7 +84,12 @@ function buildNodePortService(name, namespace, port, targetPort, labels) {
     },
     spec: {
       selector: { app: name },
-      ports: [{ protocol: "TCP", port, targetPort, name: "external" }],
+      ports: ports.map((p) => ({
+        name: p.name,
+        protocol: "TCP",
+        port: p.port,
+        targetPort: p.targetPort,
+      })),
       type: "NodePort",
     },
   };

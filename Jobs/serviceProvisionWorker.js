@@ -272,26 +272,42 @@ const serviceProvisionWorker = new Worker(
       }
 
       /* ── Step 5e (cont): Create NodePort for external access ──────── */
+      // Per-service port mapping (includes secondary ports like console/management UIs)
+      const SERVICE_PORTS = {
+        mysql:         [{ name: "mysql", port: 3306, targetPort: 3306 }],
+        postgresql:    [{ name: "postgres", port: 5432, targetPort: 5432 }],
+        mongodb:       [{ name: "mongo", port: 27017, targetPort: 27017 }],
+        redis:         [{ name: "redis", port: 6379, targetPort: 6379 }],
+        rabbitmq:      [{ name: "amqp", port: 5672, targetPort: 5672 }, { name: "management", port: 15672, targetPort: 15672 }],
+        kafka:         [{ name: "kafka", port: 9092, targetPort: 9092 }],
+        minio:         [{ name: "api", port: 9000, targetPort: 9000 }, { name: "console", port: 9001, targetPort: 9001 }],
+        meilisearch:   [{ name: "http", port: 7700, targetPort: 7700 }],
+        elasticsearch: [{ name: "http", port: 9200, targetPort: 9200 }],
+      };
+
+      const servicePorts = SERVICE_PORTS[catalog.name] || [{ name: "default", port: catalog.defaultPort, targetPort: catalog.defaultPort }];
+
       const nodePortSpec = buildNodePortService(
         kubeResName,
         instance.namespace,
-        catalog.defaultPort,
-        catalog.defaultPort,
+        servicePorts,
         standardLabels(instance.id, catalog.name, instance.ProjectId),
       );
       await applyResource("Service", nodePortSpec, instance.namespace);
       await appendLog(instance, "  → NodePort Service created (external access)");
 
-      // Read back the auto-assigned NodePort
-      let externalPort = null;
+      // Read back ALL auto-assigned NodePorts
+      const externalPorts = {}; // { portName: nodePort }
       try {
         const npSvc = await coreV1.readNamespacedService({
           name: `${kubeResName}-external`,
           namespace: instance.namespace,
         });
-        externalPort = npSvc?.spec?.ports?.[0]?.nodePort || null;
-        if (externalPort) {
-          await appendLog(instance, `  → External port: ${externalPort}`);
+        for (const p of (npSvc?.spec?.ports || [])) {
+          if (p.nodePort) {
+            externalPorts[p.name] = p.nodePort;
+            await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+          }
         }
       } catch {
         await appendLog(instance, "  ⚠ Could not read NodePort (non-fatal)");
@@ -310,25 +326,37 @@ const serviceProvisionWorker = new Worker(
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
       const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
-      // TCP services (MySQL, Redis, etc.) can't use subdomain routing like HTTP.
-      // The NodePort number is what distinguishes them. localhost is correct.
       const externalHost = "localhost";
+
+      // Primary external port (first port in the map)
+      const primaryPortName = servicePorts[0].name;
+      const primaryExternalPort = externalPorts[primaryPortName] || null;
+
       const connDetails = buildConnectionDetails(
         catalog.name,
         credentials,
         internalHost,
         catalog.defaultPort,
-        externalPort ? externalHost : null,
-        externalPort,
+        primaryExternalPort ? externalHost : null,
+        primaryExternalPort,
       );
+
+      // Add secondary external ports (console, management, etc.)
+      for (const sp of servicePorts.slice(1)) {
+        const np = externalPorts[sp.name];
+        if (np) {
+          connDetails[`${sp.name}Port`] = np;
+          connDetails[`${sp.name}Uri`] = `http://${externalHost}:${np}`;
+        }
+      }
 
       instance.connectionDetails = encrypt(JSON.stringify(connDetails));
       instance.status = "running";
       await instance.save();
 
       await appendLog(instance, `  → Internal: ${internalHost}:${catalog.defaultPort}`);
-      if (externalPort) {
-        await appendLog(instance, `  → External: ${externalHost}:${externalPort}`);
+      if (primaryExternalPort) {
+        await appendLog(instance, `  → External: ${externalHost}:${primaryExternalPort}`);
       }
 
       /* ── Step 8: Auto-inject env vars ──────────────────────────── */

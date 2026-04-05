@@ -33,8 +33,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "256Mi", storage: "1Gi" },
-      medium: { cpu: "500m", memory: "512Mi", storage: "5Gi" },
-      large: { cpu: "1000m", memory: "1Gi", storage: "20Gi" },
     },
     envVarMapping: {
       DATABASE_URL: "uri",
@@ -65,8 +63,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "512Mi", storage: "1Gi" },
-      medium: { cpu: "500m", memory: "1Gi", storage: "5Gi" },
-      large: { cpu: "1000m", memory: "2Gi", storage: "20Gi" },
     },
     envVarMapping: {
       DATABASE_URL: "uri",
@@ -95,8 +91,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "256Mi", storage: "1Gi" },
-      medium: { cpu: "500m", memory: "512Mi", storage: "5Gi" },
-      large: { cpu: "1000m", memory: "1Gi", storage: "20Gi" },
     },
     envVarMapping: {
       MONGODB_URI: "uri",
@@ -134,8 +128,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "100m", memory: "128Mi", storage: "0" },
-      medium: { cpu: "250m", memory: "256Mi", storage: "0" },
-      large: { cpu: "500m", memory: "512Mi", storage: "0" },
     },
     envVarMapping: {
       REDIS_URL: "uri",
@@ -164,8 +156,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "256Mi", storage: "512Mi" },
-      medium: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
-      large: { cpu: "1000m", memory: "1Gi", storage: "5Gi" },
     },
     envVarMapping: {
       RABBITMQ_URL: "uri",
@@ -193,8 +183,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
-      medium: { cpu: "1000m", memory: "1Gi", storage: "10Gi" },
-      large: { cpu: "2000m", memory: "2Gi", storage: "50Gi" },
     },
     envVarMapping: {
       KAFKA_BROKER: "uri",
@@ -222,8 +210,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "256Mi", storage: "5Gi" },
-      medium: { cpu: "500m", memory: "512Mi", storage: "20Gi" },
-      large: { cpu: "1000m", memory: "1Gi", storage: "100Gi" },
     },
     envVarMapping: {
       S3_ENDPOINT: "uri",
@@ -253,8 +239,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "250m", memory: "256Mi", storage: "1Gi" },
-      medium: { cpu: "500m", memory: "512Mi", storage: "5Gi" },
-      large: { cpu: "1000m", memory: "1Gi", storage: "20Gi" },
     },
     envVarMapping: {
       MEILISEARCH_URL: "uri",
@@ -281,8 +265,6 @@ const CATALOG_ENTRIES = [
     },
     templates: {
       small: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
-      medium: { cpu: "1000m", memory: "1Gi", storage: "10Gi" },
-      large: { cpu: "2000m", memory: "2Gi", storage: "50Gi" },
     },
     envVarMapping: {
       ELASTICSEARCH_URL: "uri",
@@ -299,10 +281,10 @@ const CATALOG_ENTRIES = [
  */
 async function seedServiceCatalog() {
   let created = 0;
-  let skipped = 0;
+  let updated = 0;
 
   for (const entry of CATALOG_ENTRIES) {
-    const [, wasCreated] = await ServiceCatalog.findOrCreate({
+    const [record, wasCreated] = await ServiceCatalog.findOrCreate({
       where: { name: entry.name },
       defaults: entry,
     });
@@ -310,12 +292,20 @@ async function seedServiceCatalog() {
     if (wasCreated) {
       created++;
     } else {
-      skipped++;
+      // Upsert — update existing records with latest config
+      await record.update({
+        templates: entry.templates,
+        requiredResources: entry.requiredResources,
+        isActive: entry.isActive,
+        displayName: entry.displayName,
+        dockerImage: entry.dockerImage,
+      });
+      updated++;
     }
   }
 
   console.log(
-    `[seedServiceCatalog] Done: ${created} created, ${skipped} already existed (${CATALOG_ENTRIES.length} total)`
+    `[seedServiceCatalog] Done: ${created} created, ${updated} updated (${CATALOG_ENTRIES.length} total)`
   );
 }
 
