@@ -38,7 +38,9 @@ function generateServiceHost(serviceInstance, environment = null) {
       const baseDomain = process.env.SERVICE_EXTERNAL_BASE_DOMAIN || process.env.PROJECT_DOMAIN || "sarthiq.in";
       external_host = `${serviceName}.${baseDomain}`;
     } else {
-      const localBaseDomain = process.env.SERVICE_LOCAL_BASE_DOMAIN || "localhost";
+      // `*.localhost` is not consistently resolved by all Windows CLI clients.
+      // Use a wildcard-resolving local dev domain by default.
+      const localBaseDomain = process.env.SERVICE_LOCAL_BASE_DOMAIN || "localtest.me";
       external_host = `${serviceName}.${localBaseDomain}`;
       fallback_host = process.env.SERVICE_LOCAL_FALLBACK_HOST || "localhost";
     }
