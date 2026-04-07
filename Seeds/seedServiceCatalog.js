@@ -274,6 +274,33 @@ const CATALOG_ENTRIES = [
     useStatefulSet: true,
     isActive: true,
   },
+  {
+    name: "opensearch",
+    displayName: "OpenSearch 2.12",
+    category: "search",
+    dockerImage: "opensearchproject/opensearch:2.12.0",
+    defaultPort: 9200,
+    requiredResources: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
+    configSchema: {},
+    volumeMounts: [{ mountPath: "/usr/share/opensearch/data" }],
+    healthCheck: {
+      httpGet: { path: "/_cluster/health", port: 9200 },
+      interval: 15,
+      timeout: 10,
+    },
+    templates: {
+      small: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
+    },
+    envVarMapping: {
+      OPENSEARCH_URL: "uri",
+      OPENSEARCH_HOST: "host",
+      OPENSEARCH_PORT: "port",
+      OPENSEARCH_USER: "username",
+      OPENSEARCH_PASSWORD: "password",
+    },
+    useStatefulSet: true,
+    isActive: true,
+  },
 ];
 
 /**

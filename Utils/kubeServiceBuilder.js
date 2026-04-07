@@ -791,6 +791,92 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
   return { statefulSet, service, secret };
 }
 
+/* ── OpenSearch ─────────────────────────────────────────────────────── */
+function buildOpenSearchResources({ instanceId, namespace, credentials, resources, projectId }) {
+  const name = resourceName("opensearch", instanceId);
+  const labels = standardLabels(instanceId, "opensearch", projectId);
+
+  // Calculate JVM heap at ~50% of allocated memory
+  const memMi = parseInt(resources?.memory || "512");
+  const heapMi = Math.max(128, Math.floor(memMi / 2));
+
+  const secret = buildSecret(`${name}-secret`, namespace, {
+    OPENSEARCH_INITIAL_ADMIN_PASSWORD: credentials.password,
+  }, labels);
+
+  const statefulSet = {
+    apiVersion: "apps/v1",
+    kind: "StatefulSet",
+    metadata: { name, namespace, labels },
+    spec: {
+      serviceName: name,
+      replicas: 1,
+      selector: { matchLabels: { app: name } },
+      template: {
+        metadata: { labels },
+        spec: {
+          automountServiceAccountToken: false,
+          // OpenSearch requires vm.max_map_count = 262144 (same as Elasticsearch)
+          initContainers: [
+            {
+              name: "sysctl",
+              image: "busybox:1.36",
+              command: ["sh", "-c", "sysctl -w vm.max_map_count=262144 || true"],
+              securityContext: { privileged: true },
+            },
+          ],
+          containers: [
+            buildContainer({
+              name: "opensearch",
+              image: "opensearchproject/opensearch:2.12.0",
+              port: 9200,
+              env: [
+                // Disable security plugin for internal K8s ClusterIP access
+                // (namespace-level isolation provides network security)
+                { name: "DISABLE_SECURITY_PLUGIN", value: "true" },
+                { name: "discovery.type", value: "single-node" },
+                { name: "OPENSEARCH_JAVA_OPTS", value: `-Xms${heapMi}m -Xmx${heapMi}m` },
+                { name: "OPENSEARCH_INITIAL_ADMIN_PASSWORD", valueFrom: { secretKeyRef: { name: `${name}-secret`, key: "OPENSEARCH_INITIAL_ADMIN_PASSWORD" } } },
+                { name: "cluster.name", value: `sarthiq-${name}` },
+                { name: "node.name", value: name },
+              ],
+              volumeMounts: [
+                { name: "data", mountPath: "/usr/share/opensearch/data" },
+              ],
+              resources,
+              readinessProbe: {
+                httpGet: { path: "/_cluster/health", port: 9200 },
+                initialDelaySeconds: 30,
+                periodSeconds: 15,
+                timeoutSeconds: 10,
+              },
+              livenessProbe: {
+                httpGet: { path: "/_cluster/health", port: 9200 },
+                initialDelaySeconds: 60,
+                periodSeconds: 30,
+                timeoutSeconds: 10,
+              },
+            }),
+          ],
+        },
+      },
+      volumeClaimTemplates: [
+        {
+          metadata: { name: "data" },
+          spec: {
+            accessModes: ["ReadWriteOnce"],
+            resources: { requests: { storage: resources?.storage || "2Gi" } },
+          },
+        },
+      ],
+    },
+  };
+
+  const service = buildClusterIPService(name, namespace, 9200, 9200, labels);
+
+  return { statefulSet, service, secret };
+}
+
 /* ── CronJob ───────────────────────────────────────────────────────── */
 function buildCronJobResources({
   instanceId,
@@ -887,6 +973,8 @@ function buildServiceResources(catalogEntry, instanceConfig) {
       return buildMeilisearchResources(instanceConfig);
     case "elasticsearch":
       return buildElasticsearchResources(instanceConfig);
+    case "opensearch":
+      return buildOpenSearchResources(instanceConfig);
     default:
       throw new Error(`Unsupported service type: ${serviceType}`);
   }
@@ -912,4 +1000,5 @@ module.exports = {
   buildMinIOResources,
   buildMeilisearchResources,
   buildElasticsearchResources,
+  buildOpenSearchResources,
 };

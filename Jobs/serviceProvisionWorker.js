@@ -283,6 +283,7 @@ const serviceProvisionWorker = new Worker(
         minio:         [{ name: "api", port: 9000, targetPort: 9000 }, { name: "console", port: 9001, targetPort: 9001 }],
         meilisearch:   [{ name: "http", port: 7700, targetPort: 7700 }],
         elasticsearch: [{ name: "http", port: 9200, targetPort: 9200 }],
+        opensearch:    [{ name: "http", port: 9200, targetPort: 9200 }],
       };
 
       const servicePorts = SERVICE_PORTS[catalog.name] || [{ name: "default", port: catalog.defaultPort, targetPort: catalog.defaultPort }];

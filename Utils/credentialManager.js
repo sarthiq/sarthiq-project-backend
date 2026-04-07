@@ -173,6 +173,12 @@ function generateCredentials(serviceType) {
         password: randomSecret(16),
       };
 
+    case "opensearch":
+      return {
+        username: "admin",
+        password: randomSecret(16),
+      };
+
     default:
       return { password };
   }
@@ -215,6 +221,9 @@ function buildConnectionUri(serviceType, credentials, host, port) {
       return `http://${host}:${port}`;
 
     case "elasticsearch":
+      return `http://${encode(credentials.username)}:${encode(credentials.password)}@${host}:${port}`;
+
+    case "opensearch":
       return `http://${encode(credentials.username)}:${encode(credentials.password)}@${host}:${port}`;
 
     default:
@@ -328,6 +337,15 @@ function getAutoInjectMapping(serviceType) {
         ELASTICSEARCH_URL: "uri",
         ELASTICSEARCH_HOST: "host",
         ELASTICSEARCH_PORT: "port",
+      };
+
+    case "opensearch":
+      return {
+        OPENSEARCH_URL: "uri",
+        OPENSEARCH_HOST: "host",
+        OPENSEARCH_PORT: "port",
+        OPENSEARCH_USER: "username",
+        OPENSEARCH_PASSWORD: "password",
       };
 
     default:
