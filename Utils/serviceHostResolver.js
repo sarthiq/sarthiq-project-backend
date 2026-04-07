@@ -32,27 +32,22 @@ function generateServiceHost(serviceInstance, environment = null) {
   const internal_host = `${serviceName}.${namespace}.svc.cluster.local`;
 
   let external_host = null;
+  let fallback_host = null;
   if (serviceInstance.externalAccessEnabled === true) {
     if (env === "production") {
       const baseDomain = process.env.SERVICE_EXTERNAL_BASE_DOMAIN || process.env.PROJECT_DOMAIN || "sarthiq.in";
       external_host = `${serviceName}.${baseDomain}`;
     } else {
-      // Local compatibility default:
-      // use plain localhost for maximum compatibility (Windows + CLI tools).
-      // Optional subdomain mode can be enabled explicitly.
-      const useSubdomain = String(process.env.SERVICE_LOCAL_USE_SUBDOMAIN || "false") === "true";
-      if (useSubdomain) {
-        const localBaseDomain = process.env.SERVICE_LOCAL_BASE_DOMAIN || "localhost";
-        external_host = `${serviceName}.${localBaseDomain}`;
-      } else {
-        external_host = process.env.SERVICE_LOCAL_EXTERNAL_HOST || "localhost";
-      }
+      const localBaseDomain = process.env.SERVICE_LOCAL_BASE_DOMAIN || "localhost";
+      external_host = `${serviceName}.${localBaseDomain}`;
+      fallback_host = process.env.SERVICE_LOCAL_FALLBACK_HOST || "localhost";
     }
   }
 
   return {
     internal_host,
     external_host,
+    fallback_host,
     port,
     service_name: serviceName,
     namespace,

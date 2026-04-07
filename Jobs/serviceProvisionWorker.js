@@ -365,6 +365,7 @@ const serviceProvisionWorker = new Worker(
       );
       const internalHost = hostDetails.internal_host;
       const externalHost = hostDetails.external_host;
+      const fallbackHost = hostDetails.fallback_host;
 
       // Primary external port (first port in the map)
       const primaryPortName = servicePorts[0].name;
@@ -378,6 +379,23 @@ const serviceProvisionWorker = new Worker(
         (primaryExternalPort && externalHost) ? externalHost : null,
         primaryExternalPort,
       );
+      connDetails.internal_host = internalHost;
+      connDetails.external_host = externalHost;
+      connDetails.fallback_host = fallbackHost;
+
+      if (primaryExternalPort && fallbackHost) {
+        const fallbackUri = buildConnectionDetails(
+          catalog.name,
+          credentials,
+          internalHost,
+          catalog.defaultPort,
+          fallbackHost,
+          primaryExternalPort,
+        );
+        connDetails.fallbackHost = fallbackHost;
+        connDetails.fallbackPort = primaryExternalPort;
+        connDetails.fallbackUri = fallbackUri.externalUri;
+      }
 
       // Add secondary external ports (console, management, etc.)
       for (const sp of servicePorts.slice(1)) {
