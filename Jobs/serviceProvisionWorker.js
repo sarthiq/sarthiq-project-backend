@@ -37,17 +37,21 @@ const {
 const {
   buildServiceResources,
   buildNodePortService,
+  buildClusterIPService,
   resourceName,
   standardLabels,
 } = require("../Utils/kubeServiceBuilder");
+const {
+  generateServiceHost,
+  canonicalServiceName,
+  canonicalNamespace,
+} = require("../Utils/serviceHostResolver");
 
 const {
   ensureNamespace,
   waitForReady,
   NAMESPACE,
 } = require("../Utils/kubeClient");
-
-const isProd = process.env.NODE_ENV === "production";
 
 const k8s = require("@kubernetes/client-node");
 const kc = new k8s.KubeConfig();
@@ -221,6 +225,11 @@ const serviceProvisionWorker = new Worker(
       await appendLog(instance, "  → Building Kubernetes resources...");
 
       const kubeResName = resourceName(catalog.name, instance.id);
+      const canonicalService = canonicalServiceName(catalog.name, instance.ProjectId);
+      const canonicalNs = canonicalNamespace(instance.ProjectId);
+      if (instance.namespace !== canonicalNs) {
+        instance.namespace = canonicalNs;
+      }
       instance.kubeResourceName = kubeResName;
       await instance.save();
 
@@ -271,6 +280,19 @@ const serviceProvisionWorker = new Worker(
         await appendLog(instance, "  → ClusterIP Service created");
       }
 
+      // Stable canonical ClusterIP service for in-cluster DNS:
+      // <serviceType>-<projectId>.<namespace>.svc.cluster.local
+      const stableService = buildClusterIPService(
+        canonicalService,
+        instance.namespace,
+        catalog.defaultPort,
+        catalog.defaultPort,
+        standardLabels(instance.id, catalog.name, instance.ProjectId),
+      );
+      stableService.spec.selector = { app: kubeResName };
+      await applyResource("Service", stableService, instance.namespace);
+      await appendLog(instance, `  → Stable Service created (${canonicalService})`);
+
       /* ── Step 5e (cont): Create NodePort for external access ──────── */
       // Per-service port mapping (includes secondary ports like console/management UIs)
       const SERVICE_PORTS = {
@@ -288,26 +310,33 @@ const serviceProvisionWorker = new Worker(
 
       const servicePorts = SERVICE_PORTS[catalog.name] || [{ name: "default", port: catalog.defaultPort, targetPort: catalog.defaultPort }];
 
-      const nodePortSpec = buildNodePortService(
-        kubeResName,
-        instance.namespace,
-        servicePorts,
-        standardLabels(instance.id, catalog.name, instance.ProjectId),
-      );
-      await applyResource("Service", nodePortSpec, instance.namespace);
-      await appendLog(instance, "  → NodePort Service created (external access)");
+      if (instance.externalAccessEnabled) {
+        const nodePortSpec = buildNodePortService(
+          canonicalService,
+          instance.namespace,
+          servicePorts,
+          standardLabels(instance.id, catalog.name, instance.ProjectId),
+        );
+        nodePortSpec.spec.selector = { app: kubeResName };
+        await applyResource("Service", nodePortSpec, instance.namespace);
+        await appendLog(instance, "  → NodePort Service created (external access)");
+      } else {
+        await appendLog(instance, "  → External access disabled (skipping NodePort)");
+      }
 
       // Read back ALL auto-assigned NodePorts
       const externalPorts = {}; // { portName: nodePort }
       try {
-        const npSvc = await coreV1.readNamespacedService({
-          name: `${kubeResName}-external`,
-          namespace: instance.namespace,
-        });
-        for (const p of (npSvc?.spec?.ports || [])) {
-          if (p.nodePort) {
-            externalPorts[p.name] = p.nodePort;
-            await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+        if (instance.externalAccessEnabled) {
+          const npSvc = await coreV1.readNamespacedService({
+            name: `${canonicalService}-external`,
+            namespace: instance.namespace,
+          });
+          for (const p of (npSvc?.spec?.ports || [])) {
+            if (p.nodePort) {
+              externalPorts[p.name] = p.nodePort;
+              await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+            }
           }
         }
       } catch {
@@ -326,9 +355,17 @@ const serviceProvisionWorker = new Worker(
       }
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
-      const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
-      const domain = isProd ? (process.env.PROJECT_DOMAIN || "sarthiq.in") : "localhost";
-      const externalHost = `${kubeResName}.svc.${domain}`;
+      const hostDetails = generateServiceHost(
+        {
+          ...instance.toJSON(),
+          serviceType: catalog.name,
+          port: catalog.defaultPort,
+        },
+        process.env.APP_ENV || process.env.NODE_ENV,
+      );
+      const internalHost = hostDetails.internal_host;
+      const externalHost = hostDetails.external_host;
+      const fallbackHost = hostDetails.fallback_host;
 
       // Primary external port (first port in the map)
       const primaryPortName = servicePorts[0].name;
@@ -339,9 +376,26 @@ const serviceProvisionWorker = new Worker(
         credentials,
         internalHost,
         catalog.defaultPort,
-        primaryExternalPort ? externalHost : null,
+        (primaryExternalPort && externalHost) ? externalHost : null,
         primaryExternalPort,
       );
+      connDetails.internal_host = internalHost;
+      connDetails.external_host = externalHost;
+      connDetails.fallback_host = fallbackHost;
+
+      if (primaryExternalPort && fallbackHost) {
+        const fallbackUri = buildConnectionDetails(
+          catalog.name,
+          credentials,
+          internalHost,
+          catalog.defaultPort,
+          fallbackHost,
+          primaryExternalPort,
+        );
+        connDetails.fallbackHost = fallbackHost;
+        connDetails.fallbackPort = primaryExternalPort;
+        connDetails.fallbackUri = fallbackUri.externalUri;
+      }
 
       // Add secondary external ports (console, management, etc.)
       for (const sp of servicePorts.slice(1)) {
