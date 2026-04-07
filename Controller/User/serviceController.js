@@ -24,6 +24,7 @@ const {
   buildConnectionDetails,
   getAutoInjectMapping,
 } = require("../../Utils/credentialManager");
+const { canonicalServiceName } = require("../../Utils/serviceHostResolver");
 
 const k8s = require("@kubernetes/client-node");
 const kc = new k8s.KubeConfig();
@@ -35,7 +36,14 @@ const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 exports.createService = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { projectId, serviceType, config, template } = req.body;
+    const {
+      projectId,
+      serviceType,
+      config,
+      template,
+      externalAccessEnabled = false,
+      externalAccessConfig = null,
+    } = req.body;
 
     // Validation
     if (!projectId || !serviceType) {
@@ -91,7 +99,7 @@ exports.createService = async (req, res) => {
 
     // Generate instance name
     const instanceName = `${serviceType}-${projectId}-${randomAlphanumeric(4)}`;
-    const namespace = `sarthiq-svc-${projectId}`;
+    const namespace = `project-${projectId}`;
 
     // Create ServiceInstance record
     const instance = await ServiceInstance.create({
@@ -108,6 +116,8 @@ exports.createService = async (req, res) => {
         memory: templateResources.memory,
         storage: templateResources.storage,
       },
+      externalAccessEnabled: Boolean(externalAccessEnabled),
+      externalAccessConfig: externalAccessConfig || null,
     });
 
     // Enqueue provisioning job
@@ -163,6 +173,10 @@ exports.deleteService = async (req, res) => {
     // Delete K8s resources
     const kubeResName = instance.kubeResourceName;
     const namespace = instance.namespace;
+    const canonicalService = canonicalServiceName(
+      instance.ServiceCatalog?.name || instance.instanceName.split("-")[0],
+      instance.ProjectId
+    );
 
     if (kubeResName && namespace) {
       try {
@@ -182,6 +196,14 @@ exports.deleteService = async (req, res) => {
         // Delete NodePort Service (external access)
         await coreV1
           .deleteNamespacedService({ name: `${kubeResName}-external`, namespace })
+          .catch(() => {});
+
+        await coreV1
+          .deleteNamespacedService({ name: canonicalService, namespace })
+          .catch(() => {});
+
+        await coreV1
+          .deleteNamespacedService({ name: `${canonicalService}-external`, namespace })
           .catch(() => {});
 
         // Delete Secret
