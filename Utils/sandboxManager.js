@@ -200,6 +200,29 @@ function getDefaultNetworkPolicy(namespace) {
             { protocol: "TCP", port: 53 },
           ],
         },
+        // Allow access to managed Sarthiq service pods (DB/queue/cache)
+        {
+          to: [
+            {
+              namespaceSelector: {},
+              podSelector: {
+                matchLabels: { "sarthiq.com/component": "service" },
+              },
+            },
+          ],
+          ports: [
+            { protocol: "TCP", port: 3306 },  // MySQL
+            { protocol: "TCP", port: 5432 },  // PostgreSQL
+            { protocol: "TCP", port: 27017 }, // MongoDB
+            { protocol: "TCP", port: 6379 },  // Redis
+            { protocol: "TCP", port: 5672 },  // RabbitMQ
+            { protocol: "TCP", port: 9092 },  // Kafka
+            { protocol: "TCP", port: 9000 },  // MinIO API
+            { protocol: "TCP", port: 9001 },  // MinIO Console
+            { protocol: "TCP", port: 9200 },  // OpenSearch/Elasticsearch
+            { protocol: "TCP", port: 7700 },  // Meilisearch
+          ],
+        },
         // HTTP/HTTPS to external
         {
           to: [
