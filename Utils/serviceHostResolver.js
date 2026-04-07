@@ -33,10 +33,21 @@ function generateServiceHost(serviceInstance, environment = null) {
 
   let external_host = null;
   if (serviceInstance.externalAccessEnabled === true) {
-    const baseDomain = env === "production"
-      ? (process.env.SERVICE_EXTERNAL_BASE_DOMAIN || process.env.PROJECT_DOMAIN || "sarthiq.in")
-      : (process.env.SERVICE_LOCAL_BASE_DOMAIN || "localhost");
-    external_host = `${serviceName}.${baseDomain}`;
+    if (env === "production") {
+      const baseDomain = process.env.SERVICE_EXTERNAL_BASE_DOMAIN || process.env.PROJECT_DOMAIN || "sarthiq.in";
+      external_host = `${serviceName}.${baseDomain}`;
+    } else {
+      // Local compatibility default:
+      // use plain localhost for maximum compatibility (Windows + CLI tools).
+      // Optional subdomain mode can be enabled explicitly.
+      const useSubdomain = String(process.env.SERVICE_LOCAL_USE_SUBDOMAIN || "false") === "true";
+      if (useSubdomain) {
+        const localBaseDomain = process.env.SERVICE_LOCAL_BASE_DOMAIN || "localhost";
+        external_host = `${serviceName}.${localBaseDomain}`;
+      } else {
+        external_host = process.env.SERVICE_LOCAL_EXTERNAL_HOST || "localhost";
+      }
+    }
   }
 
   return {
