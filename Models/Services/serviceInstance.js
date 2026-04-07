@@ -95,6 +95,17 @@ const ServiceInstance = sequelize.define(
       allowNull: true,
       comment: "Provisioning log trail",
     },
+    externalAccessEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      comment: "Whether service should be exposed outside cluster",
+    },
+    externalAccessConfig: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      comment: "External exposure configuration (mode, ipWhitelist, auth)",
+    },
   },
   {
     tableName: "serviceInstances",
