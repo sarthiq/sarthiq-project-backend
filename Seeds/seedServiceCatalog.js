@@ -280,7 +280,7 @@ const CATALOG_ENTRIES = [
     category: "search",
     dockerImage: "opensearchproject/opensearch:2.12.0",
     defaultPort: 9200,
-    requiredResources: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
+    requiredResources: { cpu: "1000m", memory: "2048Mi", storage: "10Gi" },
     configSchema: {},
     volumeMounts: [{ mountPath: "/usr/share/opensearch/data" }],
     healthCheck: {
@@ -289,7 +289,7 @@ const CATALOG_ENTRIES = [
       timeout: 10,
     },
     templates: {
-      small: { cpu: "500m", memory: "512Mi", storage: "2Gi" },
+      small: { cpu: "1000m", memory: "2048Mi", storage: "10Gi" },
     },
     envVarMapping: {
       OPENSEARCH_URL: "uri",

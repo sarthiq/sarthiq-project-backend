@@ -14,9 +14,9 @@ const PLAN_ENTRIES = [
   {
     name: "free",
     maxServices: 3,
-    maxCpuMillicores: 1000,   // 1 vCPU total
-    maxMemoryMi: 1024,        // 1 GiB total
-    maxStorageGi: 5,          // 5 GiB total
+    maxCpuMillicores: 2000,   // 2 vCPU total
+    maxMemoryMi: 3072,        // 3 GiB total
+    maxStorageGi: 15,         // 15 GiB total
     allowedServices: ["*"],   // All services available on free tier
     maxCronJobs: 2,
     logRetentionHours: 24,
