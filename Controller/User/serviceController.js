@@ -41,9 +41,14 @@ exports.createService = async (req, res) => {
       serviceType,
       config,
       template,
-      externalAccessEnabled = false,
+      externalAccessEnabled,
       externalAccessConfig = null,
     } = req.body;
+    // Backward compatibility:
+    // If the frontend has not yet shipped explicit external toggle support,
+    // keep historical behavior (external access enabled).
+    const shouldEnableExternal =
+      externalAccessEnabled === undefined ? true : Boolean(externalAccessEnabled);
 
     // Validation
     if (!projectId || !serviceType) {
@@ -116,7 +121,7 @@ exports.createService = async (req, res) => {
         memory: templateResources.memory,
         storage: templateResources.storage,
       },
-      externalAccessEnabled: Boolean(externalAccessEnabled),
+      externalAccessEnabled: shouldEnableExternal,
       externalAccessConfig: externalAccessConfig || null,
     });
 
@@ -137,6 +142,7 @@ exports.createService = async (req, res) => {
         serviceType,
         template: selectedTemplate,
         namespace,
+        externalAccessEnabled: shouldEnableExternal,
         estimatedTime: "30-60s",
       },
     });
