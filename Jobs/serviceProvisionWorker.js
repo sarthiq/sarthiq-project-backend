@@ -29,7 +29,6 @@ const EnvironmentVariable = require("../Models/Services/environmentVariable");
 
 const {
   generateCredentials,
-  buildConnectionDetails,
   getAutoInjectMapping,
   encrypt,
 } = require("../Utils/credentialManager");
@@ -37,17 +36,24 @@ const {
 const {
   buildServiceResources,
   buildNodePortService,
+  buildClusterIPService,
   resourceName,
   standardLabels,
 } = require("../Utils/kubeServiceBuilder");
+const {
+  canonicalServiceName,
+  canonicalNamespace,
+} = require("../Utils/serviceHostResolver");
+const {
+  getServiceEndpoints,
+  generateServiceConnection,
+} = require("../Utils/serviceConnectionResolver");
 
 const {
   ensureNamespace,
   waitForReady,
   NAMESPACE,
 } = require("../Utils/kubeClient");
-
-const isProd = process.env.NODE_ENV === "production";
 
 const k8s = require("@kubernetes/client-node");
 const kc = new k8s.KubeConfig();
@@ -221,6 +227,11 @@ const serviceProvisionWorker = new Worker(
       await appendLog(instance, "  → Building Kubernetes resources...");
 
       const kubeResName = resourceName(catalog.name, instance.id);
+      const canonicalService = canonicalServiceName(catalog.name, instance.ProjectId);
+      const canonicalNs = canonicalNamespace(instance.ProjectId);
+      if (instance.namespace !== canonicalNs) {
+        instance.namespace = canonicalNs;
+      }
       instance.kubeResourceName = kubeResName;
       await instance.save();
 
@@ -271,43 +282,51 @@ const serviceProvisionWorker = new Worker(
         await appendLog(instance, "  → ClusterIP Service created");
       }
 
-      /* ── Step 5e (cont): Create NodePort for external access ──────── */
-      // Per-service port mapping (includes secondary ports like console/management UIs)
-      const SERVICE_PORTS = {
-        mysql:         [{ name: "mysql", port: 3306, targetPort: 3306 }],
-        postgresql:    [{ name: "postgres", port: 5432, targetPort: 5432 }],
-        mongodb:       [{ name: "mongo", port: 27017, targetPort: 27017 }],
-        redis:         [{ name: "redis", port: 6379, targetPort: 6379 }],
-        rabbitmq:      [{ name: "amqp", port: 5672, targetPort: 5672 }, { name: "management", port: 15672, targetPort: 15672 }],
-        kafka:         [{ name: "kafka", port: 9092, targetPort: 9092 }],
-        minio:         [{ name: "api", port: 9000, targetPort: 9000 }, { name: "console", port: 9001, targetPort: 9001 }],
-        meilisearch:   [{ name: "http", port: 7700, targetPort: 7700 }],
-        elasticsearch: [{ name: "http", port: 9200, targetPort: 9200 }],
-        opensearch:    [{ name: "http", port: 9200, targetPort: 9200 }],
-      };
-
-      const servicePorts = SERVICE_PORTS[catalog.name] || [{ name: "default", port: catalog.defaultPort, targetPort: catalog.defaultPort }];
-
-      const nodePortSpec = buildNodePortService(
-        kubeResName,
+      // Stable canonical ClusterIP service for in-cluster DNS:
+      // <serviceType>-<projectId>.<namespace>.svc.cluster.local
+      const stableService = buildClusterIPService(
+        canonicalService,
         instance.namespace,
-        servicePorts,
+        catalog.defaultPort,
+        catalog.defaultPort,
         standardLabels(instance.id, catalog.name, instance.ProjectId),
       );
-      await applyResource("Service", nodePortSpec, instance.namespace);
-      await appendLog(instance, "  → NodePort Service created (external access)");
+      stableService.spec.selector = { app: kubeResName };
+      await applyResource("Service", stableService, instance.namespace);
+      await appendLog(instance, `  → Stable Service created (${canonicalService})`);
+
+      /* ── Step 5e (cont): Create NodePort for external access ──────── */
+      // Per-service port mapping (includes secondary ports like console/management UIs)
+      const endpointConfig = getServiceEndpoints(catalog.name, catalog.defaultPort);
+      const servicePorts = [endpointConfig.primary, ...endpointConfig.secondary];
+
+      if (instance.externalAccessEnabled) {
+        const nodePortSpec = buildNodePortService(
+          canonicalService,
+          instance.namespace,
+          servicePorts,
+          standardLabels(instance.id, catalog.name, instance.ProjectId),
+        );
+        nodePortSpec.spec.selector = { app: kubeResName };
+        await applyResource("Service", nodePortSpec, instance.namespace);
+        await appendLog(instance, "  → NodePort Service created (external access)");
+      } else {
+        await appendLog(instance, "  → External access disabled (skipping NodePort)");
+      }
 
       // Read back ALL auto-assigned NodePorts
       const externalPorts = {}; // { portName: nodePort }
       try {
-        const npSvc = await coreV1.readNamespacedService({
-          name: `${kubeResName}-external`,
-          namespace: instance.namespace,
-        });
-        for (const p of (npSvc?.spec?.ports || [])) {
-          if (p.nodePort) {
-            externalPorts[p.name] = p.nodePort;
-            await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+        if (instance.externalAccessEnabled) {
+          const npSvc = await coreV1.readNamespacedService({
+            name: `${canonicalService}-external`,
+            namespace: instance.namespace,
+          });
+          for (const p of (npSvc?.spec?.ports || [])) {
+            if (p.nodePort) {
+              externalPorts[p.name] = p.nodePort;
+              await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+            }
           }
         }
       } catch {
@@ -326,39 +345,24 @@ const serviceProvisionWorker = new Worker(
       }
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
-      const internalHost = `${kubeResName}.${instance.namespace}.svc.cluster.local`;
-      const domain = isProd ? (process.env.PROJECT_DOMAIN || "sarthiq.in") : "localhost";
-      const externalHost = `${kubeResName}.svc.${domain}`;
-
-      // Primary external port (first port in the map)
-      const primaryPortName = servicePorts[0].name;
-      const primaryExternalPort = externalPorts[primaryPortName] || null;
-
-      const connDetails = buildConnectionDetails(
-        catalog.name,
+      const { hostDetails, result: connDetails } = generateServiceConnection({
+        serviceInstance: instance.toJSON(),
+        serviceType: catalog.name,
         credentials,
-        internalHost,
-        catalog.defaultPort,
-        primaryExternalPort ? externalHost : null,
-        primaryExternalPort,
-      );
-
-      // Add secondary external ports (console, management, etc.)
-      for (const sp of servicePorts.slice(1)) {
-        const np = externalPorts[sp.name];
-        if (np) {
-          connDetails[`${sp.name}Port`] = np;
-          connDetails[`${sp.name}Uri`] = `http://${externalHost}:${np}`;
-        }
-      }
+        defaultPort: catalog.defaultPort,
+        environment: process.env.APP_ENV || process.env.NODE_ENV,
+        externalPorts,
+      });
+      const internalHost = hostDetails.internal_host;
+      const externalHost = hostDetails.external_host;
 
       instance.connectionDetails = encrypt(JSON.stringify(connDetails));
       instance.status = "running";
       await instance.save();
 
       await appendLog(instance, `  → Internal: ${internalHost}:${catalog.defaultPort}`);
-      if (primaryExternalPort) {
-        await appendLog(instance, `  → External: ${externalHost}:${primaryExternalPort}`);
+      if (connDetails.externalPort) {
+        await appendLog(instance, `  → External: ${externalHost}:${connDetails.externalPort}`);
       }
 
       /* ── Step 8: Auto-inject env vars ──────────────────────────── */
