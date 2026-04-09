@@ -300,7 +300,7 @@ async function bootstrap() {
   // bypass above. This is a safety net for edge cases.
   app.use(sleepProxyHandler);
 
-  db.sync()
+  db.sync({ alter: true })
     .then(() => {
       const port = process.env.APP_PORT || 3000;
 
