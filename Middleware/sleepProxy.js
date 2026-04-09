@@ -235,11 +235,17 @@ const notFoundPage = (subdomain) => {
 // Map<subdomain, proxyMiddleware>
 const proxyCache = new Map();
 
-function getOrCreateProxy(subdomain) {
-  if (proxyCache.has(subdomain)) return proxyCache.get(subdomain);
+function getOrCreateProxy(subdomain, clusterIP) {
+  if (proxyCache.has(subdomain)) {
+    // Verify existing proxy's target is still correct (ClusterIPs can theoretically change if recreated)
+    const existingProxy = proxyCache.get(subdomain);
+    // If we need to dynamically route, http-proxy-middleware allows custom routers. 
+    return existingProxy;
+  }
 
-  // K8s internal DNS: <service-name>.<namespace>.svc.cluster.local
-  const target = `http://${subdomain}.${NAMESPACE}.svc.cluster.local`;
+  // Use the RAW ClusterIP to completely bypass host DNS limitations!
+  // Node.js running on Ubuntu cannot resolve .svc.cluster.local natively.
+  const target = `http://${clusterIP}:80`;
 
   const proxy = createProxyMiddleware({
     target,
@@ -340,9 +346,29 @@ async function sleepProxyHandler(req, res, next) {
         ).catch(() => {});
       }
 
-      // Proxy to K8s service
-      const proxy = getOrCreateProxy(subdomain);
-      return proxy(req, res, next);
+      try {
+        // Resolve the raw ClusterIP of the service first via Kubernetes API
+        const clusterIP = await getServiceClusterIP(subdomain);
+        if (!clusterIP) {
+            console.error(`[sleepProxy] ❌ Could not find ClusterIP for ${subdomain}. Service may be deleted.`);
+            // Auto correct status
+            docker.status = "sleeping";
+            await docker.save();
+            return res.status(502).send(
+              `<meta http-equiv="refresh" content="2">` +
+              `<div style="font-family:system-ui;background:#0a0a0f;color:#e4e4e7;min-height:100vh;display:flex;align-items:center;justify-content:center;">` +
+              `<div style="text-align:center"><p style="font-size:48px;margin-bottom:16px">🔄</p>` +
+              `<h2>Container restarting…</h2><p style="color:#71717a;font-size:14px">Service IP binding...</p></div></div>`
+            );
+        }
+
+        // Proxy using the raw Cluster IP bypassing Host machine's isolated DNS
+        const proxy = getOrCreateProxy(subdomain, clusterIP);
+        return proxy(req, res, next);
+      } catch (err) {
+        console.error(`[sleepProxy] K8s API Error resolving service IP: ${err.message}`);
+        return res.status(502).send("Service unroutable");
+      }
     }
 
     case "sleeping": {
