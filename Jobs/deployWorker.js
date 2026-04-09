@@ -648,8 +648,12 @@ const deployWorker = new Worker(
       jobRecord.completedAt = new Date();
       await jobRecord.save();
 
-      // Use correct URL scheme — http for localhost, https for production
       const urlScheme = DEPLOY_DOMAIN === "localhost" ? "http" : "https";
+
+      // Release optimistic lock. Actual usage is handled by K8s and syncNodeMetrics.
+      if (reservedNodeId) {
+        await releaseNode(reservedNodeId).catch(console.error);
+      }
 
       await appendLog(
         jobRecord,
