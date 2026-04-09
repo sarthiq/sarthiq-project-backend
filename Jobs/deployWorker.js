@@ -151,6 +151,7 @@ const deployWorker = new Worker(
     let tmpDir = null;
 
     try {
+      await updateStatus("building");
       /* ── STEP 0: Input validation (BEFORE any work) ──────────────── */
       await appendLog(jobRecord, "Step 0: Validating project inputs...");
 

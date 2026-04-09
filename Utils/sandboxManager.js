@@ -52,10 +52,7 @@ function getSecureConfig() {
 
     // Pod-level security context
     podSecurityContext: {
-      runAsNonRoot: true,
-      runAsUser: 1000,
-      runAsGroup: 1000,
-      fsGroup: 1000,
+      runAsNonRoot: false, // Standard public images (like nginx) crash if forced as non-root
       seccompProfile: {
         type: "RuntimeDefault",
       },
