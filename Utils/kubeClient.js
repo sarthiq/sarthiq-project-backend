@@ -1023,8 +1023,12 @@ async function getServiceNodePort(name) {
     .readNamespacedService({ name: label, namespace: NAMESPACE })
     .catch(() => null);
   
-  if (!svc || !svc.body || !svc.body.spec || !svc.body.spec.ports || svc.body.spec.ports.length === 0) return null;
-  return svc.body.spec.ports[0].nodePort || null;
+  if (!svc) return null;
+  
+  // K8s client may return data directly or wrapped in .body
+  const spec = svc.spec || svc.body?.spec;
+  if (!spec || !spec.ports || spec.ports.length === 0) return null;
+  return spec.ports[0].nodePort || null;
 }
 
 /* ------------------------------------------------------------------ */
