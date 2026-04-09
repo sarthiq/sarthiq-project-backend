@@ -4,7 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { activityLogger } = require("./Middleware/activityLogger");
-const { subdomainParser, PROJECT_DOMAIN } = require("./Middleware/subdomainParser");
+const {
+  subdomainParser,
+  PROJECT_DOMAIN,
+} = require("./Middleware/subdomainParser");
 const {
   sleepProxyHandler,
   router: proxyRouter,
@@ -48,8 +51,8 @@ const STATIC_ORIGINS = (
 
 // Regex patterns for wildcard subdomain matching
 const WILDCARD_ORIGINS = [
-  /\.sarthiq\.in$/,   // *.sarthiq.in
-  /\.sarthiq\.com$/,  // *.sarthiq.com
+  /\.sarthiq\.in$/, // *.sarthiq.in
+  /\.sarthiq\.com$/, // *.sarthiq.com
   /\.localhost(:\d+)?$/, // *.localhost / *.localhost:PORT (dev)
 ];
 
@@ -300,7 +303,7 @@ async function bootstrap() {
   // bypass above. This is a safety net for edge cases.
   app.use(sleepProxyHandler);
 
-  db.sync({ alter: true })
+  db.sync()
     .then(() => {
       const port = process.env.APP_PORT || 3000;
 
@@ -313,8 +316,12 @@ async function bootstrap() {
       server.listen(port);
       console.log(`Listening to the port : ${port}`);
       console.log(`Project domain: ${PROJECT_DOMAIN}`);
-      console.log(`Subdomain routing: *.${PROJECT_DOMAIN} → student project proxy`);
-      console.log(`Platform domain: sarthiq.com → passes through to API routes`);
+      console.log(
+        `Subdomain routing: *.${PROJECT_DOMAIN} → student project proxy`,
+      );
+      console.log(
+        `Platform domain: sarthiq.com → passes through to API routes`,
+      );
       console.log(
         `GraphQL endpoint available at http://localhost:${port}/graphql`,
       );

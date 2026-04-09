@@ -458,7 +458,7 @@ async function createService({ name, containerPort, namespace = null }) {
     spec: {
       selector: { app: label },
       ports: [{ protocol: "TCP", port: 80, targetPort: containerPort }],
-      type: "ClusterIP",
+      type: "NodePort",
     },
   };
 
@@ -1015,14 +1015,16 @@ async function getPodMetrics() {
 }
 
 /* ------------------------------------------------------------------ */
-/* GET: clusterIP of a service (for internal proxy)                    */
+/* GET: NodePort of a service (for internal proxy)                     */
 /* ------------------------------------------------------------------ */
-async function getServiceClusterIP(name) {
+async function getServiceNodePort(name) {
   const label = safeLabel(name);
   const svc = await coreV1
     .readNamespacedService({ name: label, namespace: NAMESPACE })
     .catch(() => null);
-  return svc?.spec?.clusterIP || null;
+  
+  if (!svc || !svc.body || !svc.body.spec || !svc.body.spec.ports || svc.body.spec.ports.length === 0) return null;
+  return svc.body.spec.ports[0].nodePort || null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1063,7 +1065,7 @@ module.exports = {
   getNodes,
   getPods,
   getPodMetrics,
-  getServiceClusterIP,
+  getServiceNodePort,
   ensureNamespace,
   safeLabel,
   NAMESPACE,
