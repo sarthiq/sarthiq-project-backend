@@ -962,6 +962,29 @@ async function deleteProjectResources(name) {
 }
 
 /* ------------------------------------------------------------------ */
+/* DELETE: K8s namespace (for project cleanup)                          */
+/* ------------------------------------------------------------------ */
+async function deleteNamespace(namespace) {
+  // Safety: never delete system namespaces
+  const protected_ns = ["default", "kube-system", "kube-public", "kube-node-lease", NAMESPACE];
+  if (protected_ns.includes(namespace)) {
+    console.warn(`[kubeClient] Refusing to delete protected namespace: ${namespace}`);
+    return;
+  }
+
+  try {
+    await coreV1.deleteNamespace({ name: namespace });
+    console.log(`[kubeClient] Namespace '${namespace}' deleted`);
+  } catch (err) {
+    if (err?.statusCode === 404 || err?.body?.code === 404) {
+      console.log(`[kubeClient] Namespace '${namespace}' already gone (404)`);
+    } else {
+      throw err;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* READ: K8s resources and metrics                                    */
 /* ------------------------------------------------------------------ */
 async function getNodes() {
@@ -1065,6 +1088,7 @@ module.exports = {
   scaleDeployment,
   waitForReady,
   deleteProjectResources,
+  deleteNamespace,
   getNodeMetrics,
   getNodes,
   getPods,

@@ -3,9 +3,13 @@ const DockerInfo = require("../../Models/Projects/dockerInfo");
 const TierConfig = require("../../Models/Projects/tierConfig");
 const DeploymentJob = require("../../Models/Deployment/deploymentJob");
 const KubeNode = require("../../Models/Deployment/kubeNode");
-const { deleteProjectResources } = require("../../Utils/kubeClient");
+const ServiceInstance = require("../../Models/Services/serviceInstance");
+const EnvironmentVariable = require("../../Models/Services/environmentVariable");
+const CronJobInstance = require("../../Models/Services/cronJobInstance");
+const { deleteProjectResources, deleteNamespace } = require("../../Utils/kubeClient");
 const { releaseNode } = require("../../Utils/nodeManager");
 const { logUserActivity } = require("../../Utils/activityLoggers");
+const { deployQueue, wakeQueue } = require("../../Jobs/queues");
 const { Op } = require("sequelize");
 
 // ── Security validators ──
@@ -197,14 +201,45 @@ module.exports = {
       if (project.UserId !== context.user.id) throw new Error("Unauthorized: Not your project");
 
       try {
-        // 1. Delete K8s resources if deployed
+        console.log(`[deleteProject] Starting full cleanup for project #${projectId} (${project.title})...`);
+
+        // ── 1. Cancel active BullMQ jobs for this project ─────────
+        try {
+          const activeJobs = await deployQueue.getJobs(["active", "waiting", "delayed"]);
+          for (const job of activeJobs) {
+            if (job.data?.projectId === projectId || String(job.data?.projectId) === String(projectId)) {
+              await job.remove().catch(() => {});
+              console.log(`[deleteProject] Removed deploy job ${job.id}`);
+            }
+          }
+          const wakeJobs = await wakeQueue.getJobs(["active", "waiting", "delayed"]);
+          for (const job of wakeJobs) {
+            if (job.data?.projectId === projectId || String(job.data?.projectId) === String(projectId)) {
+              await job.remove().catch(() => {});
+              console.log(`[deleteProject] Removed wake job ${job.id}`);
+            }
+          }
+        } catch (qErr) {
+          console.warn(`[deleteProject] BullMQ cleanup skipped: ${qErr.message}`);
+        }
+
+        // ── 2. Delete K8s resources if deployed ──────────────────
         if (project.subdomain) {
           await deleteProjectResources(project.subdomain).catch((err) => {
-            console.warn(`[deleteProject] K8s cleanup skipped: ${err.message}`);
+            console.warn(`[deleteProject] K8s resource cleanup skipped: ${err.message}`);
           });
         }
 
-        // 2. Release KubeNode capacity if assigned
+        // ── 3. Delete K8s namespace for this project ─────────────
+        const namespace = `project-${projectId}`;
+        try {
+          await deleteNamespace(namespace);
+          console.log(`[deleteProject] Deleted namespace ${namespace}`);
+        } catch (nsErr) {
+          console.warn(`[deleteProject] Namespace cleanup skipped: ${nsErr.message}`);
+        }
+
+        // ── 4. Release KubeNode capacity if assigned ─────────────
         const dockerInfo = await DockerInfo.findOne({ where: { ProjectId: projectId } });
         if (dockerInfo?.nodeId) {
           const kubeNode = await KubeNode.findOne({ where: { nodeName: dockerInfo.nodeId } });
@@ -214,21 +249,30 @@ module.exports = {
           }
         }
 
-        // 3. Delete related DB records (order matters for FK constraints)
+        // ── 5. Delete services, env vars, cron jobs for this project ─
+        const svcCount = await ServiceInstance.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+        const envCount = await EnvironmentVariable.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+        const cronCount = await CronJobInstance.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+        if (svcCount || envCount || cronCount) {
+          console.log(`[deleteProject] Cleaned: ${svcCount} services, ${envCount} env vars, ${cronCount} cron jobs`);
+        }
+
+        // ── 6. Delete core DB records (order matters for FK) ─────
         await DeploymentJob.destroy({ where: { ProjectId: projectId } });
         await DockerInfo.destroy({ where: { ProjectId: projectId } });
         await project.destroy();
 
-        // 3. Log activity
+        // ── 7. Log activity ──────────────────────────────────────
         await logUserActivity(
           context.user.id,
           'DELETE_PROJECT',
           `Project deleted: ${project.title}`
         );
 
+        console.log(`[deleteProject] ✅ Full cleanup complete for project #${projectId}`);
         return true;
       } catch (error) {
-        console.error(error);
+        console.error(`[deleteProject] FAILED for #${projectId}:`, error);
         throw new Error(error.message || "Failed to delete project");
       }
     }

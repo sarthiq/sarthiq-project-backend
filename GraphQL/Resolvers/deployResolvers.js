@@ -286,6 +286,21 @@ module.exports = {
       if (!project) throw new Error("Project not found");
       if (!project.subdomain) return true;
 
+      // Cancel any active/waiting BullMQ jobs for this project
+      try {
+        for (const queue of [deployQueue, wakeQueue]) {
+          const jobs = await queue.getJobs(["active", "waiting", "delayed"]);
+          for (const job of jobs) {
+            if (String(job.data?.projectId) === String(projectId)) {
+              await job.remove().catch(() => {});
+              console.log(`[deleteProjectDeploy] Removed ${queue.name} job ${job.id}`);
+            }
+          }
+        }
+      } catch (qErr) {
+        console.warn(`[deleteProjectDeploy] BullMQ cleanup skipped: ${qErr.message}`);
+      }
+
       // Release node capacity before deleting
       const docker = await DockerInfo.findOne({ where: { ProjectId: projectId } });
       if (docker?.nodeId) {
@@ -295,6 +310,12 @@ module.exports = {
           console.log(`[deleteProjectDeploy] Released node capacity for ${docker.nodeId}`);
         }
       }
+
+      // Mark any in-progress deploy jobs as failed
+      await DeploymentJob.update(
+        { status: "failed", errorMessage: "Cancelled by admin: deployment deleted", completedAt: new Date() },
+        { where: { ProjectId: projectId, status: { [Op.in]: ["queued", "building"] } } }
+      );
 
       await deleteProjectResources(project.subdomain).catch(() => {});
       await DockerInfo.update(

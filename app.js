@@ -34,6 +34,7 @@ const { initGithubApp, checkGithubCredentials } = require("./Utils/githubApp");
 
 // ── Background Crons ─────────────────────────────────────────────
 const { startKubeNodeCleanupCron } = require("./Jobs/kubeNodeCleanupCron");
+const { startDataHygieneCron } = require("./Jobs/dataHygieneCron");
 
 // ── FIX: use const (was global variable leak) ──
 const app = express();
@@ -322,6 +323,7 @@ async function bootstrap() {
 
       // Start background crons
       startKubeNodeCleanupCron();
+      startDataHygieneCron();
       console.log(
         `Subdomain routing: *.${PROJECT_DOMAIN} → student project proxy`,
       );

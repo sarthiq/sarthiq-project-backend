@@ -594,12 +594,19 @@ const deployWorker = new Worker(
       const svcHost = await createService({ name: deployName, containerPort });
       await appendLog(jobRecord, `  → Service created: ${svcHost}`);
 
-      const publicHost = await createIngress({
-        name: deployName,
-        subdomain: project.subdomain,
-        baseDomain: DEPLOY_DOMAIN,
-      });
-      await appendLog(jobRecord, `  → Ingress created: ${publicHost}`);
+      // Ingress creation is non-fatal: the platform routes traffic via
+      // system Nginx → sleepProxy → ClusterIP, not through K8s Ingress.
+      try {
+        const publicHost = await createIngress({
+          name: deployName,
+          subdomain: project.subdomain,
+          baseDomain: DEPLOY_DOMAIN,
+        });
+        await appendLog(jobRecord, `  → Ingress created: ${publicHost}`);
+      } catch (ingressErr) {
+        await appendLog(jobRecord, `  ⚠ Ingress creation skipped (non-fatal): ${ingressErr.message?.slice(0, 150)}`);
+        console.warn(`[deployWorker] Ingress creation failed for ${deployName}: ${ingressErr.message?.slice(0, 200)}`);
+      }
 
       /* ── STEP 9: Wait for pod ready (with diagnostics) ────────────── */
       await appendLog(jobRecord, "Step 9/10: Waiting for pod to become ready...");
