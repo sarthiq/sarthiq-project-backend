@@ -33,7 +33,7 @@ const DockerInfo = require("../Models/Projects/dockerInfo");
 const Project = require("../Models/Projects/projects");
 const DeploymentJob = require("../Models/Deployment/deploymentJob");
 const { wakeQueue } = require("../Jobs/queues");
-const { getServiceNodePort } = require("../Utils/kubeClient");
+const { getServiceClusterIP } = require("../Utils/kubeClient");
 const { escapeHtml } = require("../Utils/securityValidator");
 const { Op } = require("sequelize");
 
@@ -236,15 +236,21 @@ const notFoundPage = (subdomain) => {
 // Map<subdomain, proxyMiddleware>
 const proxyCache = new Map();
 
-function getOrCreateProxy(subdomain, nodePort) {
-  if (proxyCache.has(subdomain)) {
-    // Verify existing proxy's target is still correct
-    const existingProxy = proxyCache.get(subdomain);
-    return existingProxy;
+function getOrCreateProxy(subdomain, clusterIP, port) {
+  const cacheKey = `${subdomain}:${clusterIP}:${port}`;
+  if (proxyCache.has(cacheKey)) {
+    return proxyCache.get(cacheKey);
   }
 
-  // Use the NodePort mapped to 127.0.0.1 to avoid host routing issues
-  const target = `http://127.0.0.1:${nodePort}`;
+  // Invalidate old proxy for this subdomain if target changed
+  for (const [key] of proxyCache) {
+    if (key.startsWith(`${subdomain}:`)) {
+      proxyCache.delete(key);
+    }
+  }
+
+  // Use ClusterIP directly — avoids NodePort + kube-proxy issues on multi-node clusters
+  const target = `http://${clusterIP}:${port}`;
 
   const proxy = createProxyMiddleware({
     target,
@@ -311,7 +317,7 @@ function getOrCreateProxy(subdomain, nodePort) {
     },
   });
 
-  proxyCache.set(subdomain, proxy);
+  proxyCache.set(cacheKey, proxy);
   return proxy;
 }
 
@@ -369,10 +375,10 @@ async function sleepProxyHandler(req, res, next) {
       }
 
       try {
-        // Resolve the assigned NodePort of the service first via Kubernetes API
-        const nodePort = await getServiceNodePort(subdomain);
-        if (!nodePort) {
-            console.error(`[sleepProxy] ❌ Could not find NodePort for ${subdomain}. Service may be deleted.`);
+        // Resolve the ClusterIP of the K8s service directly (avoids NodePort/kube-proxy issues)
+        const svcInfo = await getServiceClusterIP(subdomain);
+        if (!svcInfo) {
+            console.error(`[sleepProxy] ❌ Could not find ClusterIP for ${subdomain}. Service may be deleted.`);
             // Auto correct status
             docker.status = "sleeping";
             await docker.save();
@@ -384,11 +390,10 @@ async function sleepProxyHandler(req, res, next) {
             );
         }
 
-        // Proxy using the localhost NodePort bypassing Host machine's isolated DNS
-        const proxy = getOrCreateProxy(subdomain, nodePort);
+        const proxy = getOrCreateProxy(subdomain, svcInfo.ip, svcInfo.port);
         return proxy(req, res, next);
       } catch (err) {
-        console.error(`[sleepProxy] K8s API Error resolving service port: ${err.message}`);
+        console.error(`[sleepProxy] K8s API Error resolving service: ${err.message}`);
         return res.status(502).send("Service unroutable");
       }
     }
