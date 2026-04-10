@@ -12,7 +12,7 @@ const DeploymentJob = require("../../Models/Deployment/deploymentJob");
 const KubeNode = require("../../Models/Deployment/kubeNode");
 const { deployQueue, wakeQueue } = require("../../Jobs/queues");
 const { deleteProjectResources } = require("../../Utils/kubeClient");
-const { registerNode } = require("../../Utils/nodeManager");
+const { registerNode, releaseNode } = require("../../Utils/nodeManager");
 
 // We'll try to pull user count from the existing User model
 let User;
@@ -285,6 +285,16 @@ module.exports = {
       const project = await Project.findByPk(projectId);
       if (!project) throw new Error("Project not found");
       if (!project.subdomain) return true;
+
+      // Release node capacity before deleting
+      const docker = await DockerInfo.findOne({ where: { ProjectId: projectId } });
+      if (docker?.nodeId) {
+        const kubeNode = await KubeNode.findOne({ where: { nodeName: docker.nodeId } });
+        if (kubeNode) {
+          await releaseNode(kubeNode.id);
+          console.log(`[deleteProjectDeploy] Released node capacity for ${docker.nodeId}`);
+        }
+      }
 
       await deleteProjectResources(project.subdomain).catch(() => {});
       await DockerInfo.update(

@@ -205,11 +205,11 @@ exports.handleInstallCallback = async (req, res) => {
       `[github] ${created ? "Created" : "Updated"} account for userId=${userId}, installationId=${installId}, account=${accountLogin}`
     );
 
-    // Redirect to frontend
-    return res.redirect(`${getFrontendUrl()}/github?github=connected`);
+    // Redirect to frontend callback page (popup will postMessage + close)
+    return res.redirect(`${getFrontendUrl()}/github/callback?status=connected`);
   } catch (err) {
     console.error("[github] handleInstallCallback error:", err.message);
-    return res.redirect(`${getFrontendUrl()}/github?error=callback_failed`);
+    return res.redirect(`${getFrontendUrl()}/github/callback?error=callback_failed`);
   }
 };
 
@@ -241,11 +241,11 @@ exports.handleSetupRedirect = async (req, res) => {
       `[github] Setup redirect without state, installation_id=${installation_id}`
     );
     return res.redirect(
-      `${frontendUrl}/github?installation_id=${installation_id}&setup_action=update`
+      `${frontendUrl}/github/callback?installation_id=${installation_id}&setup_action=update`
     );
   } catch (err) {
     console.error("[github] handleSetupRedirect error:", err.message);
-    return res.redirect(`${getFrontendUrl()}/github?error=setup_failed`);
+    return res.redirect(`${getFrontendUrl()}/github/callback?error=setup_failed`);
   }
 };
 

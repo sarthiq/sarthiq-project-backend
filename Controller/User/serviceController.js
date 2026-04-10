@@ -51,22 +51,25 @@ exports.createService = async (req, res) => {
       externalAccessEnabled === undefined ? true : Boolean(externalAccessEnabled);
 
     // Validation
-    if (!projectId || !serviceType) {
+    if (!serviceType) {
       return res.status(400).json({
         success: false,
-        message: "projectId and serviceType are required",
+        message: "serviceType is required",
       });
     }
 
-    // Verify project belongs to user
-    const project = await Project.findOne({
-      where: { id: projectId, UserId: userId },
-    });
-    if (!project) {
-      return res.status(404).json({
-        success: false,
-        message: "Project not found or access denied",
+    // Verify project belongs to user (if projectId provided)
+    let project = null;
+    if (projectId) {
+      project = await Project.findOne({
+        where: { id: projectId, UserId: userId },
       });
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          message: "Project not found or access denied",
+        });
+      }
     }
 
     // Verify service exists in catalog and is active
@@ -102,14 +105,17 @@ exports.createService = async (req, res) => {
       });
     }
 
-    // Generate instance name
-    const instanceName = `${serviceType}-${projectId}-${randomAlphanumeric(4)}`;
-    const namespace = `project-${projectId}`;
+    // Generate instance name and namespace
+    const instanceSuffix = randomAlphanumeric(4);
+    const instanceName = projectId
+      ? `${serviceType}-${projectId}-${instanceSuffix}`
+      : `${serviceType}-standalone-${instanceSuffix}`;
+    const namespace = projectId ? `project-${projectId}` : `user-${userId}-svc`;
 
     // Create ServiceInstance record
     const instance = await ServiceInstance.create({
       UserId: userId,
-      ProjectId: projectId,
+      ProjectId: projectId || null,
       ServiceCatalogId: catalogEntry.id,
       instanceName,
       status: "provisioning",
@@ -556,6 +562,100 @@ exports.getUsage = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to get usage",
+      error: err.message,
+    });
+  }
+};
+
+/* ── GET /api/services/user ─────────────────────────────────────── */
+exports.listUserServices = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const instances = await ServiceInstance.findAll({
+      where: { UserId: userId },
+      include: [
+        { model: ServiceCatalog, attributes: ["name", "displayName", "category", "defaultPort"] },
+        { model: Project, attributes: ["id", "title", "subdomain"], required: false },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    const data = instances.map((inst) => ({
+      id: inst.id,
+      instanceName: inst.instanceName,
+      status: inst.status,
+      serviceType: inst.ServiceCatalog?.name,
+      displayName: inst.ServiceCatalog?.displayName,
+      category: inst.ServiceCatalog?.category,
+      template: inst.template,
+      resourceUsage: inst.resourceUsage,
+      isExternal: inst.isExternal,
+      namespace: inst.namespace,
+      projectId: inst.ProjectId,
+      projectTitle: inst.Project?.title || null,
+      projectSubdomain: inst.Project?.subdomain || null,
+      createdAt: inst.createdAt,
+      errorMessage: inst.status === "failed" ? inst.errorMessage : undefined,
+    }));
+
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error("[serviceController] listUserServices error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to list services",
+      error: err.message,
+    });
+  }
+};
+
+/* ── PATCH /api/services/:id/project ───────────────────────────── */
+exports.assignServiceProject = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+    const { projectId } = req.body; // null to make standalone, or ID to assign
+
+    const instance = await ServiceInstance.findOne({
+      where: { id, UserId: userId },
+    });
+    if (!instance) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found or access denied",
+      });
+    }
+
+    // Validate project if provided
+    if (projectId) {
+      const project = await Project.findOne({
+        where: { id: projectId, UserId: userId },
+      });
+      if (!project) {
+        return res.status(404).json({
+          success: false,
+          message: "Project not found or access denied",
+        });
+      }
+    }
+
+    // Update the project assignment
+    instance.ProjectId = projectId || null;
+    await instance.save();
+
+    return res.json({
+      success: true,
+      message: projectId
+        ? "Service assigned to project"
+        : "Service detached from project (standalone)",
+      data: { id: instance.id, ProjectId: instance.ProjectId },
+    });
+  } catch (err) {
+    console.error("[serviceController] assignServiceProject error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update service project",
       error: err.message,
     });
   }

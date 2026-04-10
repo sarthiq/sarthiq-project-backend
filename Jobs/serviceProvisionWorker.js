@@ -69,6 +69,19 @@ async function appendLog(instance, line) {
   await instance.save();
 }
 
+/* ── Helper: wait for PVC to bind (with clear timeout error) ──────── */
+async function waitForPvcBound(pvcName, namespace, timeoutMs = 60_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const pvc = await coreV1.readNamespacedPersistentVolumeClaim({ name: pvcName, namespace });
+      if (pvc.status?.phase === "Bound") return true;
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  return false;
+}
+
 /* ── Helper: create or replace K8s resource (idempotent) ───────────── */
 async function applyResource(kind, spec, namespace) {
   const name = spec.metadata.name;
@@ -263,6 +276,18 @@ const serviceProvisionWorker = new Worker(
       if (k8sResources.pvc) {
         await applyResource("PersistentVolumeClaim", k8sResources.pvc, instance.namespace);
         await appendLog(instance, "  → PVC created");
+
+        // Wait for PVC to bind before proceeding
+        const pvcName = k8sResources.pvc.metadata.name;
+        await appendLog(instance, `  → Waiting for PVC '${pvcName}' to bind...`);
+        const pvcBound = await waitForPvcBound(pvcName, instance.namespace, 60_000);
+        if (!pvcBound) {
+          throw new Error(
+            `PVC '${pvcName}' stuck in Pending after 60s. No StorageClass provisioner found. ` +
+            `Run on server: kubectl get sc && kubectl -n local-path-storage get pods`
+          );
+        }
+        await appendLog(instance, "  → PVC bound successfully");
       }
 
       // 5d. StatefulSet or Deployment

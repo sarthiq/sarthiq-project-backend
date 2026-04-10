@@ -32,6 +32,9 @@ const githubWebhookRouter = require("./Routes/User/githubWebhook");
 const { handleSetupRedirect } = require("./Controller/User/githubController");
 const { initGithubApp, checkGithubCredentials } = require("./Utils/githubApp");
 
+// ── Background Crons ─────────────────────────────────────────────
+const { startKubeNodeCleanupCron } = require("./Jobs/kubeNodeCleanupCron");
+
 // ── FIX: use const (was global variable leak) ──
 const app = express();
 
@@ -316,6 +319,9 @@ async function bootstrap() {
       server.listen(port);
       console.log(`Listening to the port : ${port}`);
       console.log(`Project domain: ${PROJECT_DOMAIN}`);
+
+      // Start background crons
+      startKubeNodeCleanupCron();
       console.log(
         `Subdomain routing: *.${PROJECT_DOMAIN} → student project proxy`,
       );

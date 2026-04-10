@@ -19,6 +19,8 @@ const {
   stopService,
   startService,
   getUsage,
+  listUserServices,
+  assignServiceProject,
   registerExternalService,
 } = require("../../Controller/User/serviceController");
 
@@ -68,8 +70,12 @@ router.get("/usage", getUsage);
 // CRUD
 router.post("/create", createService);
 router.delete("/:id", deleteService);
-router.get("/project/:projectId", listServices);
+router.get("/user", listUserServices);          // All services for user (flat list)
+router.get("/project/:projectId", listServices); // By project
 router.get("/:id", getService);
+
+// Project assignment (dropdown reassignment)
+router.patch("/:id/project", assignServiceProject);
 
 // Lifecycle
 router.post("/:id/stop", stopService);

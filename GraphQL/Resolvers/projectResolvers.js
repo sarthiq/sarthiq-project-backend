@@ -2,7 +2,9 @@ const Project = require("../../Models/Projects/projects");
 const DockerInfo = require("../../Models/Projects/dockerInfo");
 const TierConfig = require("../../Models/Projects/tierConfig");
 const DeploymentJob = require("../../Models/Deployment/deploymentJob");
+const KubeNode = require("../../Models/Deployment/kubeNode");
 const { deleteProjectResources } = require("../../Utils/kubeClient");
+const { releaseNode } = require("../../Utils/nodeManager");
 const { logUserActivity } = require("../../Utils/activityLoggers");
 const { Op } = require("sequelize");
 
@@ -202,7 +204,17 @@ module.exports = {
           });
         }
 
-        // 2. Delete related DB records (order matters for FK constraints)
+        // 2. Release KubeNode capacity if assigned
+        const dockerInfo = await DockerInfo.findOne({ where: { ProjectId: projectId } });
+        if (dockerInfo?.nodeId) {
+          const kubeNode = await KubeNode.findOne({ where: { nodeName: dockerInfo.nodeId } });
+          if (kubeNode) {
+            await releaseNode(kubeNode.id);
+            console.log(`[deleteProject] Released node capacity for ${dockerInfo.nodeId}`);
+          }
+        }
+
+        // 3. Delete related DB records (order matters for FK constraints)
         await DeploymentJob.destroy({ where: { ProjectId: projectId } });
         await DockerInfo.destroy({ where: { ProjectId: projectId } });
         await project.destroy();

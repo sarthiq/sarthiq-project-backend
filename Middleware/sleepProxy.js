@@ -35,6 +35,7 @@ const DeploymentJob = require("../Models/Deployment/deploymentJob");
 const { wakeQueue } = require("../Jobs/queues");
 const { getServiceNodePort } = require("../Utils/kubeClient");
 const { escapeHtml } = require("../Utils/securityValidator");
+const { Op } = require("sequelize");
 
 const { PROJECT_DOMAIN } = require("./subdomainParser");
 const NAMESPACE = process.env.K8S_NAMESPACE || "sarthiq-apps";
@@ -261,14 +262,28 @@ function getOrCreateProxy(subdomain, nodePort) {
             const docker = await DockerInfo.findOne({
               where: { ProjectId: project.id, status: "running" },
             });
-            if (docker) {
-              console.log(
-                `[sleepProxy] ⚠ Auto-correcting ${subdomain}: proxy 502 → marking as sleeping`
-              );
-              docker.status = "sleeping";
-              await docker.save();
-              // Invalidate proxy cache so next request re-evaluates
-              proxyCache.delete(subdomain);
+          if (docker) {
+              // Don't auto-correct if a wake/deploy is in progress
+              const activeJob = await DeploymentJob.findOne({
+                where: {
+                  ProjectId: project.id,
+                  status: { [Op.in]: ["queued", "building"] },
+                  createdAt: { [Op.gt]: new Date(Date.now() - 2 * 60 * 1000) },
+                },
+              });
+              if (!activeJob) {
+                console.log(
+                  `[sleepProxy] ⚠ Auto-correcting ${subdomain}: proxy 502 → marking as sleeping`
+                );
+                docker.status = "sleeping";
+                await docker.save();
+                // Invalidate proxy cache so next request re-evaluates
+                proxyCache.delete(subdomain);
+              } else {
+                console.log(
+                  `[sleepProxy] ⚠ Proxy 502 for ${subdomain} but wake/deploy in progress (job #${activeJob.id}) — skipping auto-correction`
+                );
+              }
             }
           }
         } catch (dbErr) {
@@ -448,7 +463,25 @@ router.get("/wake-status/:projectId", async (req, res) => {
     return res.status(400).json({ error: "Invalid project ID" });
   }
   const docker = await DockerInfo.findOne({ where: { ProjectId: projectId } });
-  res.json({ status: docker?.status || "unknown" });
+
+  // Get latest deployment job for progress info
+  const latestJob = await DeploymentJob.findOne({
+    where: { ProjectId: parseInt(projectId) },
+    order: [["createdAt", "DESC"]],
+    attributes: ["status", "logs", "createdAt"],
+  });
+
+  // Extract last meaningful log line as the phase
+  const logs = latestJob?.logs || "";
+  const lines = logs.trim().split("\n").filter(Boolean);
+  const lastLine = lines[lines.length - 1] || "";
+  const phase = lastLine.replace(/^\[.*?\]\s*/, "").slice(0, 120);
+
+  res.json({
+    status: docker?.status || "unknown",
+    phase: latestJob?.status === "building" ? phase : null,
+    jobStatus: latestJob?.status || null,
+  });
 });
 
 module.exports = { sleepProxyHandler, router };

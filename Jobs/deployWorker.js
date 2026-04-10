@@ -59,6 +59,8 @@ const {
 } = require("../Utils/securityValidator");
 const { detectRootRequirements, autoPatchDockerfile } = require("../Utils/rootDetector");
 const { resolveExecutionMode, detectSuspiciousActivity } = require("../Utils/sandboxManager");
+const { clonePrivateRepo } = require("../Utils/githubClone");
+const GithubAccount = require("../Models/Projects/githubAccount");
 
 const isProd = process.env.NODE_ENV === "production";
 const REGISTRY = process.env.DOCKER_REGISTRY || (isProd ? "registry.sarthiq.com" : "");
@@ -214,13 +216,48 @@ const deployWorker = new Worker(
       await appendLog(jobRecord, "Step 2/10: Cloning repository...");
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `sarthiq-${projectId}-`));
 
-      // Use spawn instead of exec — no shell interpolation possible
-      await spawnAsync(
-        "git",
-        ["clone", "--branch", project.branch, "--depth", "1", project.projectRepoUrl, tmpDir],
-        { timeout: 120_000 }
-      );
-      await appendLog(jobRecord, "  → Clone complete.");
+      // Determine if this is a private GitHub repo that needs authenticated clone
+      const isGithubUrl = project.projectRepoUrl.includes("github.com");
+      let cloneSucceeded = false;
+
+      if (isGithubUrl) {
+        // Find the user's active GitHub account for installation token
+        const ghAccount = await GithubAccount.findOne({
+          where: { userId: project.UserId, isActive: true },
+        });
+        if (ghAccount) {
+          try {
+            // Extract owner/repo from URL
+            const match = project.projectRepoUrl.match(
+              /github\.com[\/:]([^\/]+)\/([^\/.]+)/
+            );
+            if (match) {
+              await appendLog(jobRecord, "  → Using GitHub App token for authenticated clone...");
+              await clonePrivateRepo({
+                installationId: ghAccount.installationId,
+                owner: match[1],
+                repo: match[2],
+                branch: project.branch,
+                targetDir: tmpDir,
+              });
+              cloneSucceeded = true;
+              await appendLog(jobRecord, "  → Authenticated clone complete.");
+            }
+          } catch (ghErr) {
+            await appendLog(jobRecord, `  ⚠ GitHub App clone failed: ${ghErr.message.slice(0, 200)}. Falling back to public clone...`);
+          }
+        }
+      }
+
+      if (!cloneSucceeded) {
+        // Fallback: public clone via spawn (no shell interpolation)
+        await spawnAsync(
+          "git",
+          ["clone", "--branch", project.branch, "--depth", "1", project.projectRepoUrl, tmpDir],
+          { timeout: 120_000 }
+        );
+        await appendLog(jobRecord, "  → Clone complete.");
+      }
 
       const buildContext = path.join(tmpDir, project.projectDirectory || ".");
 

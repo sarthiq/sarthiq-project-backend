@@ -14,6 +14,11 @@
  * ─────────────────────────────────────────────────────────────────────
  */
 
+// ── StorageClass for dynamic PV provisioning ──────────────────────────
+// Set K8S_STORAGE_CLASS env to match your cluster's provisioner.
+// Default: "local-path" (Rancher's local-path-provisioner for bare-metal)
+const STORAGE_CLASS = process.env.K8S_STORAGE_CLASS || "local-path";
+
 /* ── Standard labels applied to all resources ──────────────────────── */
 function standardLabels(instanceId, serviceType, projectId) {
   return {
@@ -32,7 +37,7 @@ function resourceName(serviceType, instanceId) {
 
 /* ── Shared builders ───────────────────────────────────────────────── */
 
-function buildPVC(name, namespace, storageSize, storageClass = null) {
+function buildPVC(name, namespace, storageSize, storageClass = STORAGE_CLASS) {
   const pvc = {
     apiVersion: "v1",
     kind: "PersistentVolumeClaim",
@@ -223,6 +228,7 @@ function buildPostgresResources({ instanceId, namespace, credentials, resources,
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -293,6 +299,7 @@ function buildMySQLResources({ instanceId, namespace, credentials, resources, pr
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -359,6 +366,7 @@ function buildMongoDBResources({ instanceId, namespace, credentials, resources, 
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -477,6 +485,7 @@ function buildRabbitMQResources({ instanceId, namespace, credentials, resources,
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "512Mi" } },
           },
         },
@@ -561,6 +570,7 @@ function buildKafkaResources({ instanceId, namespace, credentials, resources, pr
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
@@ -779,6 +789,7 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
@@ -865,6 +876,7 @@ function buildOpenSearchResources({ instanceId, namespace, credentials, resource
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
+            storageClassName: STORAGE_CLASS,
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
