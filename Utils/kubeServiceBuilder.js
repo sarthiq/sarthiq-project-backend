@@ -15,9 +15,11 @@
  */
 
 // ── StorageClass for dynamic PV provisioning ──────────────────────────
-// Set K8S_STORAGE_CLASS env to match your cluster's provisioner.
-// Default: "local-path" (Rancher's local-path-provisioner for bare-metal)
-const STORAGE_CLASS = process.env.K8S_STORAGE_CLASS || "local-path";
+// Set K8S_STORAGE_CLASS env to override. If not set, Kubernetes uses
+// whichever StorageClass is marked as "(default)" in the cluster.
+// - Docker Desktop: "hostpath"   (default)
+// - Production:     "local-path" (default after installing local-path-provisioner)
+const STORAGE_CLASS = process.env.K8S_STORAGE_CLASS || undefined;
 
 /* ── Standard labels applied to all resources ──────────────────────── */
 function standardLabels(instanceId, serviceType, projectId) {
@@ -228,7 +230,7 @@ function buildPostgresResources({ instanceId, namespace, credentials, resources,
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -299,7 +301,7 @@ function buildMySQLResources({ instanceId, namespace, credentials, resources, pr
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -366,7 +368,7 @@ function buildMongoDBResources({ instanceId, namespace, credentials, resources, 
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "1Gi" } },
           },
         },
@@ -485,7 +487,7 @@ function buildRabbitMQResources({ instanceId, namespace, credentials, resources,
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "512Mi" } },
           },
         },
@@ -570,7 +572,7 @@ function buildKafkaResources({ instanceId, namespace, credentials, resources, pr
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
@@ -789,7 +791,7 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
@@ -876,7 +878,7 @@ function buildOpenSearchResources({ instanceId, namespace, credentials, resource
           metadata: { name: "data" },
           spec: {
             accessModes: ["ReadWriteOnce"],
-            storageClassName: STORAGE_CLASS,
+            ...(STORAGE_CLASS && { storageClassName: STORAGE_CLASS }),
             resources: { requests: { storage: resources?.storage || "2Gi" } },
           },
         },
