@@ -596,8 +596,9 @@ const deployWorker = new Worker(
 
       // Ingress creation is non-fatal: the platform routes traffic via
       // system Nginx → sleepProxy → ClusterIP, not through K8s Ingress.
+      let publicHost = `${project.subdomain}.${DEPLOY_DOMAIN}`;
       try {
-        const publicHost = await createIngress({
+        publicHost = await createIngress({
           name: deployName,
           subdomain: project.subdomain,
           baseDomain: DEPLOY_DOMAIN,
