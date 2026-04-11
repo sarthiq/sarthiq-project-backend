@@ -109,7 +109,8 @@ async function buildDockerImage({
   validateEnvVars(buildTimeEnvs);
 
   // Build argument array (NO shell interpolation)
-  const args = ["build"];
+  // Use BuildKit for faster parallel builds and better caching
+  const args = ["build", "--progress=plain"];
 
   // Add build-args safely
   for (const [key, value] of Object.entries(buildTimeEnvs)) {
@@ -119,8 +120,13 @@ async function buildDockerImage({
   // Tag and context
   args.push("-t", imageTag, buildContext);
 
-  // Execute via spawn (NEVER exec/shell)
-  return await spawnAsync("docker", args, { timeout });
+  // Execute via spawn with BuildKit enabled (NEVER exec/shell)
+  // DOCKER_BUILDKIT=1 enables: parallel multi-stage builds, better caching,
+  // and eliminates the "legacy builder deprecated" warning.
+  return await spawnAsync("docker", args, {
+    timeout,
+    env: { ...process.env, DOCKER_BUILDKIT: "1" },
+  });
 }
 
 /* ------------------------------------------------------------------ */
