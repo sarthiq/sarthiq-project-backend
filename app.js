@@ -42,7 +42,18 @@ const app = express();
 app.set("trust proxy", 1);
 
 // ── Security headers (Helmet) ─────────────────────────────────────
-app.use(helmetMiddleware);
+// IMPORTANT: Only apply Helmet to platform routes (sarthiq.com).
+// Deployed student projects (*.sarthiq.in) are proxied through this
+// server and must NOT inherit the platform's restrictive CSP — their
+// frontends need to call their own backend subdomains (cross-origin).
+app.use((req, res, next) => {
+  const host = (req.headers.host || "").split(":")[0].toLowerCase();
+  // Skip Helmet for deployed project subdomains (e.g., user-app.sarthiq.in)
+  if (host.endsWith(`.${PROJECT_DOMAIN}`) || host.endsWith(".localhost")) {
+    return next();
+  }
+  return helmetMiddleware(req, res, next);
+});
 
 // ── CORS: support wildcard subdomains + known origins ─────────────
 const STATIC_ORIGINS = (
