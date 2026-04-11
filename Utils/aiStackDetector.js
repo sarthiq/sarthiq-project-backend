@@ -369,6 +369,56 @@ function heuristicDetect(buildContext) {
     };
   }
 
+  /* ── Java (Maven) ───────────────────────────────────────────── */
+  if (fs.existsSync(pomPath)) {
+    const pomContent = safeRead(pomPath) || "";
+    const isSpringBoot = /spring-boot/i.test(pomContent);
+    return {
+      language: "java",
+      framework: isSpringBoot ? "spring-boot" : "maven",
+      buildCommand: "mvn clean package -DskipTests",
+      startCommand: "java -jar target/*.jar",
+      port: isSpringBoot ? 8080 : 8080,
+      isStaticSite: false,
+      buildOutputDir: "target",
+      packageManager: "maven",
+    };
+  }
+
+  /* ── Java (Gradle) ──────────────────────────────────────────── */
+  if (fs.existsSync(gradlePath)) {
+    const gradleContent = safeRead(gradlePath) || "";
+    const isSpringBoot = /spring-boot/i.test(gradleContent) || /org\.springframework\.boot/i.test(gradleContent);
+    const hasWrapper = fs.existsSync(path.join(buildContext, "gradlew"));
+    const gradleCmd = hasWrapper ? "./gradlew" : "gradle";
+    return {
+      language: "java",
+      framework: isSpringBoot ? "spring-boot" : "gradle",
+      buildCommand: `${gradleCmd} build -x test`,
+      startCommand: "java -jar build/libs/*.jar",
+      port: 8080,
+      isStaticSite: false,
+      buildOutputDir: "build/libs",
+      packageManager: "gradle",
+    };
+  }
+
+  /* ── Ruby (Gemfile) ─────────────────────────────────────────── */
+  if (fs.existsSync(gemfilePath)) {
+    const gemContent = safeRead(gemfilePath) || "";
+    const isRails = /rails/i.test(gemContent);
+    return {
+      language: "ruby",
+      framework: isRails ? "rails" : "ruby",
+      buildCommand: isRails ? "bundle exec rails assets:precompile" : null,
+      startCommand: isRails ? "bundle exec rails server -b 0.0.0.0 -p 3000" : "bundle exec ruby app.rb",
+      port: 3000,
+      isStaticSite: false,
+      buildOutputDir: null,
+      packageManager: "bundler",
+    };
+  }
+
   /* ── Not detected ────────────────────────────────────────────── */
   return null;
 }
@@ -419,12 +469,15 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
     packageManager,
   } = detection;
 
+  // Use forgiving install commands — 'npm ci' and '--frozen-lockfile' fail
+  // when lock files are out of sync, which is common on user-submitted repos.
+  // Fallback: try strict first, fall back to permissive install.
   const installCmd =
     packageManager === "yarn"
-      ? "yarn install --frozen-lockfile"
+      ? "yarn install --frozen-lockfile || yarn install"
       : packageManager === "pnpm"
-        ? "pnpm install --frozen-lockfile"
-        : "npm ci --legacy-peer-deps";
+        ? "pnpm install --frozen-lockfile || pnpm install"
+        : "npm ci --legacy-peer-deps || npm install --legacy-peer-deps";
 
   // Build-time ARG + ENV lines
   const buildArgLines = Object.keys(buildTimeEnvs)
@@ -553,6 +606,70 @@ WORKDIR /app
 COPY --from=builder /app/app .
 EXPOSE ${port || 8080}
 CMD ["./app"]
+`.trim();
+  }
+
+  /* ── Java (Maven) ───────────────────────────────────────────── */
+  if (language === "java" && (framework === "maven" || framework === "spring-boot") && packageManager === "maven") {
+    return `
+FROM maven:3.9-eclipse-temurin-21-alpine AS builder
+WORKDIR /app
+COPY pom.xml ./
+RUN mvn dependency:go-offline -B
+COPY . .
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=builder /app/target/*.jar app.jar
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+USER appuser
+EXPOSE ${port || 8080}
+CMD ["java", "-jar", "app.jar"]
+`.trim();
+  }
+
+  /* ── Java (Gradle) ──────────────────────────────────────────── */
+  if (language === "java" && (framework === "gradle" || framework === "spring-boot") && packageManager === "gradle") {
+    return `
+FROM gradle:8.5-jdk21-alpine AS builder
+WORKDIR /app
+COPY build.gradle* settings.gradle* gradlew* ./
+COPY gradle/ gradle/ 2>/dev/null || true
+RUN gradle dependencies --no-daemon 2>/dev/null || true
+COPY . .
+RUN gradle build -x test --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=builder /app/build/libs/*.jar app.jar
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+USER appuser
+EXPOSE ${port || 8080}
+CMD ["java", "-jar", "app.jar"]
+`.trim();
+  }
+
+  /* ── Ruby ────────────────────────────────────────────────────── */
+  if (language === "ruby") {
+    const buildStep = buildCommand ? `RUN ${buildCommand}` : "";
+    const cmdParts = (startCommand || "bundle exec ruby app.rb")
+      .split(" ")
+      .map((s) => `"${s}"`)
+      .join(", ");
+
+    return `
+FROM ruby:3.3-slim
+WORKDIR /app
+RUN apt-get update -qq && apt-get install -y build-essential libpq-dev nodejs && rm -rf /var/lib/apt/lists/*
+COPY Gemfile Gemfile.lock* ./
+RUN bundle install --jobs 4 --retry 3
+COPY . .
+${buildStep}
+RUN addgroup --gid 1001 appgroup && adduser --uid 1001 --gid 1001 --disabled-password appuser
+USER appuser
+EXPOSE ${port || 3000}
+CMD [${cmdParts}]
 `.trim();
   }
 
