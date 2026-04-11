@@ -31,9 +31,8 @@ kc.loadFromDefault();
 const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
 const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
-// 12 hours of inactivity → sleep (configurable via SLEEP_INACTIVITY_MINUTES env)
-const INACTIVITY_TIMEOUT_MS =
-  parseInt(process.env.SLEEP_INACTIVITY_MINUTES || "720") * 60 * 1000;
+// 12 hours of inactivity → sleep
+const INACTIVITY_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 43,200,000 ms = 12 hours
 
 const INGRESS_NAMESPACE = "ingress-nginx";
 const INGRESS_SELECTOR = "app.kubernetes.io/component=controller";
@@ -304,8 +303,7 @@ async function startSleepWatcherCron() {
     }
   }
 
-  const intervalMs =
-    parseInt(process.env.SLEEP_CHECK_INTERVAL_MINUTES || "5") * 60 * 1000;
+  const intervalMs = 5 * 60 * 1000; // 5 minutes
 
   await sleepCheckQueue.add(
     "sleep-check",

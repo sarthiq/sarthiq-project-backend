@@ -236,6 +236,15 @@ const notFoundPage = (subdomain) => {
 // Map<subdomain, proxyMiddleware>
 const proxyCache = new Map();
 
+/* ── Auto-correction strike counter ────────────────────────────── */
+// Prevents a single proxy timeout from marking a project as sleeping.
+// Requires STRIKE_THRESHOLD consecutive failures within STRIKE_WINDOW_MS
+// before auto-correcting status to 'sleeping'.
+const STRIKE_THRESHOLD = 3;
+const STRIKE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
+// Map<subdomain, { count: number, firstAt: number }>
+const proxyFailStrikes = new Map();
+
 function getOrCreateProxy(subdomain, clusterIP, port) {
   const cacheKey = `${subdomain}:${clusterIP}:${port}`;
   if (proxyCache.has(cacheKey)) {
@@ -260,35 +269,61 @@ function getOrCreateProxy(subdomain, clusterIP, port) {
       error: async (err, req, res) => {
         console.error(`[sleepProxy] Proxy error for ${subdomain}: ${err.message}`);
 
-        // ── AUTO-CORRECT: If proxy fails, the K8s service/pod likely doesn't exist ──
-        // Mark the project as sleeping so the next request serves the wake page
+        // ── STRIKE-BASED AUTO-CORRECT ────────────────────────────────
+        // Don't mark as sleeping on a single failure — transient network
+        // issues (cross-node latency, Calico tunnel flaps) would cause a
+        // destructive sleep→wake→sleep loop.  Require STRIKE_THRESHOLD
+        // consecutive failures within STRIKE_WINDOW_MS before correcting.
         try {
-          const project = await Project.findOne({ where: { subdomain } });
-          if (project) {
-            const docker = await DockerInfo.findOne({
-              where: { ProjectId: project.id, status: "running" },
-            });
-          if (docker) {
-              // Don't auto-correct if a wake/deploy is in progress
-              const activeJob = await DeploymentJob.findOne({
-                where: {
-                  ProjectId: project.id,
-                  status: { [Op.in]: ["queued", "building"] },
-                  createdAt: { [Op.gt]: new Date(Date.now() - 2 * 60 * 1000) },
-                },
-              });
-              if (!activeJob) {
-                console.log(
-                  `[sleepProxy] ⚠ Auto-correcting ${subdomain}: proxy 502 → marking as sleeping`
-                );
-                docker.status = "sleeping";
-                await docker.save();
-                // Invalidate proxy cache so next request re-evaluates
-                proxyCache.delete(subdomain);
-              } else {
-                console.log(
-                  `[sleepProxy] ⚠ Proxy 502 for ${subdomain} but wake/deploy in progress (job #${activeJob.id}) — skipping auto-correction`
-                );
+          const now = Date.now();
+          const strike = proxyFailStrikes.get(subdomain);
+
+          if (!strike || (now - strike.firstAt) > STRIKE_WINDOW_MS) {
+            // First failure or window expired — start fresh
+            proxyFailStrikes.set(subdomain, { count: 1, firstAt: now });
+            console.log(
+              `[sleepProxy] ⚠ Proxy failure #1/${STRIKE_THRESHOLD} for ${subdomain} (will auto-correct after ${STRIKE_THRESHOLD} failures in ${STRIKE_WINDOW_MS / 1000}s)`
+            );
+          } else {
+            strike.count += 1;
+            console.log(
+              `[sleepProxy] ⚠ Proxy failure #${strike.count}/${STRIKE_THRESHOLD} for ${subdomain}`
+            );
+
+            if (strike.count >= STRIKE_THRESHOLD) {
+              // Enough failures — auto-correct
+              proxyFailStrikes.delete(subdomain);
+
+              const project = await Project.findOne({ where: { subdomain } });
+              if (project) {
+                const docker = await DockerInfo.findOne({
+                  where: { ProjectId: project.id, status: "running" },
+                });
+                if (docker) {
+                  // Don't auto-correct if a wake/deploy is in progress
+                  const activeJob = await DeploymentJob.findOne({
+                    where: {
+                      ProjectId: project.id,
+                      status: { [Op.in]: ["queued", "building"] },
+                      createdAt: { [Op.gt]: new Date(Date.now() - 5 * 60 * 1000) },
+                    },
+                  });
+                  if (!activeJob) {
+                    console.log(
+                      `[sleepProxy] ⚠ Auto-correcting ${subdomain}: ${STRIKE_THRESHOLD} consecutive proxy failures → marking as sleeping`
+                    );
+                    docker.status = "sleeping";
+                    await docker.save();
+                    // Invalidate proxy cache so next request re-evaluates
+                    for (const [key] of proxyCache) {
+                      if (key.startsWith(`${subdomain}:`)) proxyCache.delete(key);
+                    }
+                  } else {
+                    console.log(
+                      `[sleepProxy] ⚠ Proxy failures for ${subdomain} but wake/deploy in progress (job #${activeJob.id}) — skipping auto-correction`
+                    );
+                  }
+                }
               }
             }
           }
@@ -374,21 +409,26 @@ async function sleepProxyHandler(req, res, next) {
         ).catch(() => {});
       }
 
+      // Clear any previous proxy-fail strikes on a successful request path
+      // (we got this far, so the project is reachable from the DB)
+
       try {
         // Resolve the ClusterIP of the K8s service directly (avoids NodePort/kube-proxy issues)
         const svcInfo = await getServiceClusterIP(subdomain);
         if (!svcInfo) {
             console.error(`[sleepProxy] ❌ Could not find ClusterIP for ${subdomain}. Service may be deleted.`);
-            // Auto correct status
-            docker.status = "sleeping";
-            await docker.save();
+            // Don't immediately mark as sleeping — return a retry page
+            // The sleepWatcher cron will handle proper cleanup if the service is truly gone
             return res.status(502).send(
-              `<meta http-equiv="refresh" content="2">` +
+              `<meta http-equiv="refresh" content="5">` +
               `<div style="font-family:system-ui;background:#0a0a0f;color:#e4e4e7;min-height:100vh;display:flex;align-items:center;justify-content:center;">` +
               `<div style="text-align:center"><p style="font-size:48px;margin-bottom:16px">🔄</p>` +
-              `<h2>Container restarting…</h2><p style="color:#71717a;font-size:14px">Service port binding...</p></div></div>`
+              `<h2>Connecting to container…</h2><p style="color:#71717a;font-size:14px">Service is resolving. Retrying in 5 seconds…</p></div></div>`
             );
         }
+
+        // Successfully resolved — clear strikes for this subdomain
+        proxyFailStrikes.delete(subdomain);
 
         const proxy = getOrCreateProxy(subdomain, svcInfo.ip, svcInfo.port);
         return proxy(req, res, next);
