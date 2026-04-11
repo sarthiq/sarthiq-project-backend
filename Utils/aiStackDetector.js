@@ -520,7 +520,66 @@ CMD ["nginx", "-g", "daemon off;"]
 `.trim();
   }
 
-  /* ── Node.js SSR (Next.js, Nuxt, Express) ────────────────────── */
+  /* ── Next.js (SSR — optimized production image) ──────────────── */
+  if (language === "node" && framework === "nextjs") {
+    return `
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+RUN ${installCmd}
+COPY . .
+${buildArgLines}
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN ${buildCommand || "npm run build"}
+# Remove dev dependencies to drastically shrink the image
+RUN npm prune --production 2>/dev/null; rm -rf .next/cache
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOST=0.0.0.0
+ENV HOSTNAME=0.0.0.0
+# Copy only production essentials (NOT the entire /app)
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/next.config* ./
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+USER appuser
+EXPOSE ${port || 3000}
+CMD ["npm", "start"]
+`.trim();
+  }
+
+  /* ── Nuxt (SSR — optimized production image) ─────────────────── */
+  if (language === "node" && framework === "nuxt") {
+    return `
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+RUN ${installCmd}
+COPY . .
+${buildArgLines}
+RUN ${buildCommand || "npm run build"}
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV HOSTNAME=0.0.0.0
+COPY --from=builder /app/.output ./.output
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
+USER appuser
+EXPOSE ${port || 3000}
+CMD ["node", ".output/server/index.mjs"]
+`.trim();
+  }
+
+  /* ── Node.js SSR (Express, Fastify, Koa, generic) ────────────── */
   if (language === "node") {
     const buildStep = buildCommand ? `RUN ${buildCommand}` : "";
     // NEVER use nodemon in production — replace with node
@@ -539,14 +598,15 @@ RUN ${installCmd}
 COPY . .
 ${buildArgLines}
 ${buildStep}
+# Remove dev dependencies for smaller production image
+RUN npm prune --production 2>/dev/null; true
 
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app ./
-# Ensure the app binds to all interfaces (not just localhost)
+ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV HOSTNAME=0.0.0.0
-# Run as non-root user for security
 RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
 RUN chown -R appuser:appgroup /app
 USER appuser

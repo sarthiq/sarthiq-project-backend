@@ -528,7 +528,7 @@ const deployWorker = new Worker(
       /* ── STEP 7: Push image ───────────────────────────────────────── */
       if (REGISTRY) {
         await appendLog(jobRecord, "Step 7/10: Pushing image to registry...");
-        await spawnAsync("docker", ["push", imageTag], { timeout: 300_000 });
+        await spawnAsync("docker", ["push", imageTag], { timeout: 600_000 });
         await appendLog(jobRecord, "  → Push complete.");
       } else {
         await appendLog(jobRecord, "Step 7/10: Local testing mode. Skipping registry push.");
