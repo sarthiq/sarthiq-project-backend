@@ -949,16 +949,40 @@ async function waitForReady(name, timeoutMs = 180_000, namespace = null) {
 /* ------------------------------------------------------------------ */
 async function deleteProjectResources(name) {
   const label = safeLabel(name);
+  console.log(`[kubeClient] Deleting project resources: ${label} from ${NAMESPACE}`);
 
-  await appsV1
-    .deleteNamespacedDeployment({ name: label, namespace: NAMESPACE })
-    .catch(() => {});
-  await coreV1
-    .deleteNamespacedService({ name: label, namespace: NAMESPACE })
-    .catch(() => {});
-  await networkingV1
-    .deleteNamespacedIngress({ name: label, namespace: NAMESPACE })
-    .catch(() => {});
+  try {
+    await appsV1.deleteNamespacedDeployment({
+      name: label,
+      namespace: NAMESPACE,
+      body: { propagationPolicy: "Foreground" },
+    });
+    console.log(`[kubeClient] ✓ Deployment '${label}' deleted`);
+  } catch (err) {
+    if (err?.statusCode !== 404) {
+      console.warn(`[kubeClient] Deployment '${label}' delete warning:`, err?.body?.message || err.message);
+    }
+  }
+
+  try {
+    await coreV1.deleteNamespacedService({ name: label, namespace: NAMESPACE });
+    console.log(`[kubeClient] ✓ Service '${label}' deleted`);
+  } catch (err) {
+    if (err?.statusCode !== 404) {
+      console.warn(`[kubeClient] Service '${label}' delete warning:`, err?.body?.message || err.message);
+    }
+  }
+
+  try {
+    await networkingV1.deleteNamespacedIngress({ name: label, namespace: NAMESPACE });
+    console.log(`[kubeClient] ✓ Ingress '${label}' deleted`);
+  } catch (err) {
+    if (err?.statusCode !== 404) {
+      console.warn(`[kubeClient] Ingress '${label}' delete warning:`, err?.body?.message || err.message);
+    }
+  }
+
+  console.log(`[kubeClient] ✅ Project resource cleanup complete for ${label}`);
 }
 
 /* ------------------------------------------------------------------ */

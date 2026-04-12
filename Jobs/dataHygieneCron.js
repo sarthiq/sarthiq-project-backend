@@ -235,6 +235,116 @@ async function runDataHygiene() {
     console.warn(`${LOG} K8s namespace cleanup skipped: ${err.message}`);
   }
 
+  // ── 9. Clean orphaned K8s workloads in sarthiq-apps ────────────────
+  // Safety net: delete Deployments/StatefulSets/Services that have our
+  // managed-by=sarthiq label but no matching DB record.
+  try {
+    const { NAMESPACE } = require("../Utils/kubeClient");
+    const k8s = require("@kubernetes/client-node");
+    const kc = new k8s.KubeConfig();
+    kc.loadFromDefault();
+    const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
+    const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
+
+    // Check orphaned service StatefulSets/Deployments
+    const svcLabel = "sarthiq.com/component=service";
+
+    // StatefulSets
+    try {
+      const ssList = await appsV1.listNamespacedStatefulSet({ namespace: NAMESPACE, labelSelector: svcLabel });
+      for (const ss of (ssList.items || [])) {
+        const instanceId = ss.metadata?.labels?.["sarthiq.com/instanceId"];
+        if (!instanceId) continue;
+        const dbRecord = await ServiceInstance.findByPk(parseInt(instanceId));
+        if (!dbRecord) {
+          console.log(`${LOG}   Orphaned StatefulSet '${ss.metadata.name}' (instanceId=${instanceId}) — deleting...`);
+          await appsV1.deleteNamespacedStatefulSet({
+            name: ss.metadata.name,
+            namespace: NAMESPACE,
+            body: { propagationPolicy: "Foreground" },
+          }).catch((e) => console.warn(`${LOG}   Failed to delete SS '${ss.metadata.name}': ${e.message}`));
+          stats.orphanedNamespaces++;
+        }
+      }
+    } catch (ssErr) {
+      console.warn(`${LOG}   StatefulSet scan error: ${ssErr.message}`);
+    }
+
+    // Deployments (only service-type, not project deployments)
+    try {
+      const depList = await appsV1.listNamespacedDeployment({ namespace: NAMESPACE, labelSelector: svcLabel });
+      for (const dep of (depList.items || [])) {
+        const instanceId = dep.metadata?.labels?.["sarthiq.com/instanceId"];
+        if (!instanceId) continue;
+        const dbRecord = await ServiceInstance.findByPk(parseInt(instanceId));
+        if (!dbRecord) {
+          console.log(`${LOG}   Orphaned Deployment '${dep.metadata.name}' (instanceId=${instanceId}) — deleting...`);
+          await appsV1.deleteNamespacedDeployment({
+            name: dep.metadata.name,
+            namespace: NAMESPACE,
+            body: { propagationPolicy: "Foreground" },
+          }).catch((e) => console.warn(`${LOG}   Failed to delete Dep '${dep.metadata.name}': ${e.message}`));
+          stats.orphanedNamespaces++;
+        }
+      }
+    } catch (depErr) {
+      console.warn(`${LOG}   Deployment scan error: ${depErr.message}`);
+    }
+
+    // Orphaned K8s Services for deleted service instances
+    try {
+      const k8sSvcList = await coreV1.listNamespacedService({ namespace: NAMESPACE, labelSelector: svcLabel });
+      for (const svc of (k8sSvcList.items || [])) {
+        const instanceId = svc.metadata?.labels?.["sarthiq.com/instanceId"];
+        if (!instanceId) continue;
+        const dbRecord = await ServiceInstance.findByPk(parseInt(instanceId));
+        if (!dbRecord) {
+          console.log(`${LOG}   Orphaned K8s Service '${svc.metadata.name}' — deleting...`);
+          await coreV1.deleteNamespacedService({
+            name: svc.metadata.name,
+            namespace: NAMESPACE,
+          }).catch((e) => console.warn(`${LOG}   Failed to delete Service '${svc.metadata.name}': ${e.message}`));
+        }
+      }
+    } catch (svcErr) {
+      console.warn(`${LOG}   Service scan error: ${svcErr.message}`);
+    }
+
+    // Orphaned project Deployments (not service-type)
+    try {
+      const projectLabel = "managed-by=sarthiq";
+      const allDeps = await appsV1.listNamespacedDeployment({ namespace: NAMESPACE, labelSelector: projectLabel });
+      for (const dep of (allDeps.items || [])) {
+        // Skip service deployments (already handled above)
+        if (dep.metadata?.labels?.["sarthiq.com/component"] === "service") continue;
+        const depName = dep.metadata.name;
+        // Check if any project has this subdomain (slug = deployment name)
+        const matchingProject = await Project.findOne({
+          where: { subdomain: depName },
+        });
+        if (!matchingProject) {
+          // Also check by safeLabel pattern — could be a different format
+          const matchByLabel = await Project.findOne({
+            where: { subdomain: depName.replace(/-\d+$/, '') },
+          });
+          if (!matchByLabel) {
+            console.log(`${LOG}   Orphaned project Deployment '${depName}' — deleting...`);
+            await appsV1.deleteNamespacedDeployment({
+              name: depName,
+              namespace: NAMESPACE,
+              body: { propagationPolicy: "Foreground" },
+            }).catch((e) => console.warn(`${LOG}   Failed to delete '${depName}': ${e.message}`));
+            stats.orphanedNamespaces++;
+          }
+        }
+      }
+    } catch (projErr) {
+      console.warn(`${LOG}   Project deployment scan error: ${projErr.message}`);
+    }
+  } catch (err) {
+    console.warn(`${LOG} K8s orphan workload cleanup skipped: ${err.message}`);
+  }
+
   // ── Summary ───────────────────────────────────────────────────────
   const total = Object.values(stats).reduce((a, b) => a + b, 0);
   if (total > 0) {

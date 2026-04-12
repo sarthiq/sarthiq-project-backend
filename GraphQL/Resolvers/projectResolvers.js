@@ -6,7 +6,14 @@ const KubeNode = require("../../Models/Deployment/kubeNode");
 const ServiceInstance = require("../../Models/Services/serviceInstance");
 const EnvironmentVariable = require("../../Models/Services/environmentVariable");
 const CronJobInstance = require("../../Models/Services/cronJobInstance");
-const { deleteProjectResources, deleteNamespace } = require("../../Utils/kubeClient");
+const { deleteProjectResources, deleteNamespace, NAMESPACE } = require("../../Utils/kubeClient");
+const { canonicalServiceName } = require("../../Utils/serviceHostResolver");
+const k8s = require("@kubernetes/client-node");
+const _kc = new k8s.KubeConfig();
+_kc.loadFromDefault();
+const _appsV1 = _kc.makeApiClient(k8s.AppsV1Api);
+const _coreV1 = _kc.makeApiClient(k8s.CoreV1Api);
+const _batchV1 = _kc.makeApiClient(k8s.BatchV1Api);
 const { releaseNode } = require("../../Utils/nodeManager");
 const { logUserActivity } = require("../../Utils/activityLoggers");
 const { deployQueue, wakeQueue } = require("../../Jobs/queues");
@@ -245,10 +252,61 @@ module.exports = {
           }
         }
 
-        // ── 5. Delete services, env vars, cron jobs for this project ─
+        // ── 5. Delete services K8s resources + DB records ─────────
+        const projectServices = await ServiceInstance.findAll({ where: { ProjectId: projectId } });
+        for (const svc of projectServices) {
+          const kubeResName = svc.kubeResourceName;
+          const svcNs = svc.namespace || NAMESPACE;
+          if (kubeResName && svcNs) {
+            console.log(`[deleteProject] Cleaning K8s resources for service ${svc.id} (${kubeResName} in ${svcNs})`);
+            // Delete StatefulSet or Deployment
+            try {
+              await _appsV1.deleteNamespacedStatefulSet({ name: kubeResName, namespace: svcNs, body: { propagationPolicy: "Foreground" } });
+              console.log(`[deleteProject] ✓ StatefulSet '${kubeResName}' deleted`);
+            } catch (ssErr) {
+              if (ssErr?.statusCode !== 404) {
+                try {
+                  await _appsV1.deleteNamespacedDeployment({ name: kubeResName, namespace: svcNs, body: { propagationPolicy: "Foreground" } });
+                  console.log(`[deleteProject] ✓ Deployment '${kubeResName}' deleted`);
+                } catch (depErr) {
+                  if (depErr?.statusCode !== 404) {
+                    console.warn(`[deleteProject] Workload '${kubeResName}' delete warning:`, depErr?.body?.message || depErr.message);
+                  }
+                }
+              }
+            }
+            // Delete K8s Services
+            const serviceType = svc.instanceName?.split("-")[0] || "unknown";
+            const canonical = canonicalServiceName(serviceType, projectId);
+            for (const name of [kubeResName, `${kubeResName}-external`, canonical, `${canonical}-external`]) {
+              try { await _coreV1.deleteNamespacedService({ name, namespace: svcNs }); } catch (e) { /* 404 ok */ }
+            }
+            // Delete Secret + ConfigMap
+            try { await _coreV1.deleteNamespacedSecret({ name: `${kubeResName}-secret`, namespace: svcNs }); } catch (e) { /* ok */ }
+            try { await _coreV1.deleteNamespacedConfigMap({ name: `${kubeResName}-config`, namespace: svcNs }); } catch (e) { /* ok */ }
+          }
+          // Delete auto-injected env vars for this service
+          await EnvironmentVariable.destroy({ where: { sourceServiceInstanceId: svc.id } }).catch(() => 0);
+        }
         const svcCount = await ServiceInstance.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
-        const envCount = await EnvironmentVariable.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+
+        // Delete cron jobs K8s resources + DB records
+        const projectCrons = await CronJobInstance.findAll({ where: { ProjectId: projectId } });
+        for (const cj of projectCrons) {
+          if (cj.kubeResourceName && cj.namespace) {
+            try {
+              await _batchV1.deleteNamespacedCronJob({ name: cj.kubeResourceName, namespace: cj.namespace, body: { propagationPolicy: "Foreground" } });
+              console.log(`[deleteProject] ✓ CronJob '${cj.kubeResourceName}' deleted`);
+            } catch (cjErr) {
+              if (cjErr?.statusCode !== 404) {
+                console.warn(`[deleteProject] CronJob '${cj.kubeResourceName}' delete warning:`, cjErr?.body?.message || cjErr.message);
+              }
+            }
+          }
+        }
         const cronCount = await CronJobInstance.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+        const envCount = await EnvironmentVariable.destroy({ where: { ProjectId: projectId } }).catch(() => 0);
+
         if (svcCount || envCount || cronCount) {
           console.log(`[deleteProject] Cleaned: ${svcCount} services, ${envCount} env vars, ${cronCount} cron jobs`);
         }

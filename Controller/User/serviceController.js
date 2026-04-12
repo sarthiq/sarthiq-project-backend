@@ -171,6 +171,7 @@ exports.deleteService = async (req, res) => {
 
     const instance = await ServiceInstance.findOne({
       where: { id, UserId: userId },
+      include: [{ model: ServiceCatalog, attributes: ["name", "displayName"] }],
     });
     if (!instance) {
       return res.status(404).json({
@@ -186,75 +187,99 @@ exports.deleteService = async (req, res) => {
     // Delete K8s resources
     const kubeResName = instance.kubeResourceName;
     const namespace = instance.namespace;
-    const canonicalService = canonicalServiceName(
-      instance.ServiceCatalog?.name || instance.instanceName.split("-")[0],
-      instance.ProjectId
-    );
+    const serviceType = instance.ServiceCatalog?.name || instance.instanceName.split("-")[0];
+    const canonicalService = canonicalServiceName(serviceType, instance.ProjectId);
+
+    console.log(`[serviceController] Deleting service ${id}: kubeRes=${kubeResName}, ns=${namespace}, canonical=${canonicalService}`);
 
     if (kubeResName && namespace) {
+      // Delete StatefulSet or Deployment (with cascade to delete pods)
       try {
-        // Delete StatefulSet or Deployment
-        await appsV1
-          .deleteNamespacedStatefulSet({ name: kubeResName, namespace })
-          .catch(() =>
-            appsV1.deleteNamespacedDeployment({ name: kubeResName, namespace })
-          )
-          .catch(() => {});
-
-        // Delete Service (ClusterIP)
-        await coreV1
-          .deleteNamespacedService({ name: kubeResName, namespace })
-          .catch(() => {});
-
-        // Delete NodePort Service (external access)
-        await coreV1
-          .deleteNamespacedService({ name: `${kubeResName}-external`, namespace })
-          .catch(() => {});
-
-        await coreV1
-          .deleteNamespacedService({ name: canonicalService, namespace })
-          .catch(() => {});
-
-        await coreV1
-          .deleteNamespacedService({ name: `${canonicalService}-external`, namespace })
-          .catch(() => {});
-
-        // Delete Secret
-        await coreV1
-          .deleteNamespacedSecret({ name: `${kubeResName}-secret`, namespace })
-          .catch(() => {});
-
-        // Delete ConfigMap
-        await coreV1
-          .deleteNamespacedConfigMap({ name: `${kubeResName}-config`, namespace })
-          .catch(() => {});
-
-        // PVCs: retain for 24h (handled by cleanup cron)
-        // Mark them for deferred deletion via label
-        try {
-          const pvcList = await coreV1.listNamespacedPersistentVolumeClaim({
-            namespace,
-            labelSelector: `sarthiq.com/instanceId=${instance.id}`,
-          });
-          for (const pvc of (pvcList.items || [])) {
-            const pvcName = pvc.metadata.name;
-            await coreV1.patchNamespacedPersistentVolumeClaim(
-              { name: pvcName, namespace, body: [
-                { op: "add", path: "/metadata/annotations/sarthiq.com~1delete-after", value: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
-              ] },
-              undefined, undefined, undefined, undefined, undefined, undefined,
-              { headers: { "Content-Type": "application/json-patch+json" } }
-            );
-          }
-        } catch (pvcErr) {
-          // Non-fatal — PVC cleanup is best-effort
-          console.warn("[serviceController] PVC label error:", pvcErr.message);
+        await appsV1.deleteNamespacedStatefulSet({
+          name: kubeResName,
+          namespace,
+          body: { propagationPolicy: "Foreground" },
+        });
+        console.log(`[serviceController] ✓ StatefulSet '${kubeResName}' deleted from '${namespace}'`);
+      } catch (ssErr) {
+        if (ssErr?.statusCode !== 404) {
+          console.log(`[serviceController] StatefulSet not found, trying Deployment...`);
         }
-
-        console.log(`[serviceController] K8s resources deleted for ${kubeResName}`);
-      } catch (k8sErr) {
-        console.error("[serviceController] K8s deletion error:", k8sErr.message);
+        try {
+          await appsV1.deleteNamespacedDeployment({
+            name: kubeResName,
+            namespace,
+            body: { propagationPolicy: "Foreground" },
+          });
+          console.log(`[serviceController] ✓ Deployment '${kubeResName}' deleted from '${namespace}'`);
+        } catch (depErr) {
+          if (depErr?.statusCode !== 404) {
+            console.error(`[serviceController] ✗ Failed to delete workload '${kubeResName}':`, depErr?.body?.message || depErr.message);
+          }
+        }
       }
+
+      // Delete Services (ClusterIP + NodePort)
+      const serviceNames = [
+        kubeResName,
+        `${kubeResName}-external`,
+        canonicalService,
+        `${canonicalService}-external`,
+      ];
+      for (const svcName of serviceNames) {
+        try {
+          await coreV1.deleteNamespacedService({ name: svcName, namespace });
+          console.log(`[serviceController] ✓ Service '${svcName}' deleted`);
+        } catch (svcErr) {
+          if (svcErr?.statusCode !== 404) {
+            console.warn(`[serviceController] Service '${svcName}' delete warning:`, svcErr?.body?.message || svcErr.message);
+          }
+        }
+      }
+
+      // Delete Secret
+      try {
+        await coreV1.deleteNamespacedSecret({ name: `${kubeResName}-secret`, namespace });
+      } catch (secErr) {
+        if (secErr?.statusCode !== 404) {
+          console.warn(`[serviceController] Secret delete warning:`, secErr?.body?.message || secErr.message);
+        }
+      }
+
+      // Delete ConfigMap
+      try {
+        await coreV1.deleteNamespacedConfigMap({ name: `${kubeResName}-config`, namespace });
+      } catch (cmErr) {
+        if (cmErr?.statusCode !== 404) {
+          console.warn(`[serviceController] ConfigMap delete warning:`, cmErr?.body?.message || cmErr.message);
+        }
+      }
+
+      // PVCs: retain for 24h (handled by cleanup cron)
+      // Mark them for deferred deletion via label
+      try {
+        const pvcList = await coreV1.listNamespacedPersistentVolumeClaim({
+          namespace,
+          labelSelector: `sarthiq.com/instanceId=${instance.id}`,
+        });
+        for (const pvc of (pvcList.items || [])) {
+          const pvcName = pvc.metadata.name;
+          await coreV1.patchNamespacedPersistentVolumeClaim(
+            { name: pvcName, namespace, body: [
+              { op: "add", path: "/metadata/annotations/sarthiq.com~1delete-after", value: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+            ] },
+            undefined, undefined, undefined, undefined, undefined, undefined,
+            { headers: { "Content-Type": "application/json-patch+json" } }
+          );
+        }
+      } catch (pvcErr) {
+        // Non-fatal — PVC cleanup is best-effort
+        console.warn("[serviceController] PVC label error:", pvcErr.message);
+      }
+
+      console.log(`[serviceController] ✅ K8s resources deleted for ${kubeResName} in ${namespace}`);
+    } else {
+      console.warn(`[serviceController] ⚠ No kubeResName (${kubeResName}) or namespace (${namespace}) — skipping K8s cleanup`);
     }
 
     // Delete auto-injected env vars
