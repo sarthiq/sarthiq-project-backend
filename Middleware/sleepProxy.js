@@ -40,6 +40,16 @@ const { Op } = require("sequelize");
 const { PROJECT_DOMAIN } = require("./subdomainParser");
 const NAMESPACE = process.env.K8S_NAMESPACE || "sarthiq-apps";
 
+/* ── K8s client for service proxy routing ───────────────────────────── */
+const k8s = require("@kubernetes/client-node");
+const kc = new k8s.KubeConfig();
+kc.loadFromDefault();
+const svcCoreV1 = kc.makeApiClient(k8s.CoreV1Api);
+
+/* ── Lazy-loaded models for service subdomain lookup ───────────────── */
+const ServiceInstance = require("../Models/Services/serviceInstance");
+const ServiceCatalog = require("../Models/Services/serviceCatalog");
+
 /* ── Redis client for wake-job deduplication keys ────────────────── */
 const redis = new IORedis({
   host: process.env.REDIS_HOST || "127.0.0.1",
@@ -364,6 +374,80 @@ async function sleepProxyHandler(req, res, next) {
   // Skip if no user subdomain (root domain, reserved, or invalid)
   if (!subdomain) {
     return next();
+  }
+
+/* ── Service subdomain routing ── */
+  // Service subdomains follow pattern: {serviceType}-{projectId}-{suffix}
+  // e.g., minio-31-console, rabbitmq-5-mgmt, meilisearch-12-api
+  // These are NOT project subdomains — they route to service ClusterIP directly.
+  const SERVICE_API_PORTS = {
+    minio: 9000,
+    meilisearch: 7700,
+    elasticsearch: 9200,
+    opensearch: 9200,
+    rabbitmq: 5672,
+  };
+  const SERVICE_SUFFIX_PORTS = {
+    console: 9001,     // MinIO console
+    mgmt:    15672,    // RabbitMQ management
+  };
+
+  // Match: {serviceType}-{projectId}-{suffix}
+  const svcMatch = subdomain.match(/^(minio|rabbitmq|meilisearch|elasticsearch|opensearch)-(\d+)-(console|api|mgmt)$/);
+  if (svcMatch) {
+    const [, svcType, projectId, suffix] = svcMatch;
+    const svcNamespace = process.env.K8S_NAMESPACE || "sarthiq-apps";
+
+    // Determine the target port
+    let targetPort;
+    if (suffix === "api") {
+      targetPort = SERVICE_API_PORTS[svcType] || 9000;
+    } else {
+      targetPort = SERVICE_SUFFIX_PORTS[suffix];
+    }
+
+    if (!targetPort) {
+      return res.status(404).send("Unknown service endpoint.");
+    }
+
+    try {
+      // Look up the ServiceInstance from DB to get the correct K8s resource name
+      const catalog = await ServiceCatalog.findOne({ where: { name: svcType } });
+      if (!catalog) {
+        return res.status(404).send("Unknown service type.");
+      }
+
+      const svcInstance = await ServiceInstance.findOne({
+        where: {
+          ProjectId: parseInt(projectId),
+          ServiceCatalogId: catalog.id,
+          status: "running",
+        },
+      });
+
+      if (!svcInstance || !svcInstance.kubeResourceName) {
+        console.log(`[sleepProxy] ❌ No running ${svcType} instance for project ${projectId}`);
+        return res.status(404).send("Service not found or not running.");
+      }
+
+      // Resolve ClusterIP of the service's K8s Service resource
+      const svcSpec = await svcCoreV1.readNamespacedService({
+        name: svcInstance.kubeResourceName,
+        namespace: svcNamespace,
+      });
+      const clusterIP = svcSpec?.spec?.clusterIP;
+      if (!clusterIP || clusterIP === "None") {
+        console.error(`[sleepProxy] ❌ No ClusterIP for service ${svcInstance.kubeResourceName}`);
+        return res.status(502).send("Service not available.");
+      }
+
+      console.log(`[sleepProxy] 🔧 Service proxy: ${subdomain} → ${clusterIP}:${targetPort}`);
+      const proxy = getOrCreateProxy(subdomain, clusterIP, targetPort);
+      return proxy(req, res, next);
+    } catch (err) {
+      console.error(`[sleepProxy] Service proxy error for ${subdomain}: ${err.message}`);
+      return res.status(502).send("Service unavailable.");
+    }
   }
 
   // Lookup project
