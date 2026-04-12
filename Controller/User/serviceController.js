@@ -267,6 +267,13 @@ exports.deleteService = async (req, res) => {
         }
       }
 
+      // Delete Ingress resources (HTTPS routing for service UIs)
+      const { deleteServiceIngress } = require("../../Utils/kubeClient");
+      const INGRESS_SUFFIXES = ["console", "api", "mgmt"];
+      for (const suffix of INGRESS_SUFFIXES) {
+        await deleteServiceIngress(`${kubeResName}-${suffix}`, namespace);
+      }
+
       // PVCs: retain for 24h (handled by cleanup cron)
       // Mark them for deferred deletion via label
       try {

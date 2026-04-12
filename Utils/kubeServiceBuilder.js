@@ -589,7 +589,7 @@ function buildKafkaResources({ instanceId, namespace, credentials, resources, pr
 }
 
 /* ── MinIO ──────────────────────────────────────────────────────────── */
-function buildMinIOResources({ instanceId, namespace, credentials, resources, projectId }) {
+function buildMinIOResources({ instanceId, namespace, credentials, resources, projectId, config }) {
   const name = resourceName("minio", instanceId);
   const labels = standardLabels(instanceId, "minio", projectId);
 
@@ -600,6 +600,14 @@ function buildMinIOResources({ instanceId, namespace, credentials, resources, pr
 
   const pvc = buildPVC(`${name}-data`, namespace, resources?.storage || "5Gi");
   pvc.metadata.labels = labels;
+
+  // MinIO console needs MINIO_BROWSER_REDIRECT_URL to generate correct CSP headers
+  // and avoid blob: script loading failures. This is set to the console's external URL.
+  const consoleUrl = config?.consoleExternalUrl;
+  const extraEnv = [];
+  if (consoleUrl) {
+    extraEnv.push({ name: "MINIO_BROWSER_REDIRECT_URL", value: consoleUrl });
+  }
 
   const deployment = {
     apiVersion: "apps/v1",
@@ -620,6 +628,7 @@ function buildMinIOResources({ instanceId, namespace, credentials, resources, pr
               command: ["minio"],
               args: ["server", "/data", "--console-address", ":9001"],
               envFrom: [{ secretRef: { name: `${name}-secret` } }],
+              env: extraEnv,
               volumeMounts: [
                 { name: "data", mountPath: "/data" },
               ],

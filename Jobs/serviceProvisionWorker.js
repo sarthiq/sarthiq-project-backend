@@ -50,6 +50,7 @@ const {
 const {
   ensureNamespace,
   waitForReady,
+  createServiceIngress,
   NAMESPACE,
 } = require("../Utils/kubeClient");
 
@@ -353,6 +354,52 @@ const serviceProvisionWorker = new Worker(
       await applyResource("Service", stableService, instance.namespace);
       await appendLog(instance, `  → Stable Service created (${canonicalService})`);
 
+      /* ── Step 5e: Create Ingress for service web UIs (HTTPS) ─────── */
+      // Services with web UIs get an Ingress with TLS (like projects).
+      // This gives them HTTPS on a proper domain instead of raw HTTP on NodePort.
+      const SERVICE_INGRESS_CONFIG = {
+        minio: [
+          { suffix: "console", port: 9001, envVar: "MINIO_BROWSER_REDIRECT_URL" },
+          { suffix: "api", port: 9000 },
+        ],
+        rabbitmq: [
+          { suffix: "mgmt", port: 15672 },
+        ],
+        meilisearch: [
+          { suffix: "api", port: 7700 },
+        ],
+        elasticsearch: [
+          { suffix: "api", port: 9200 },
+        ],
+        opensearch: [
+          { suffix: "api", port: 9200 },
+        ],
+      };
+
+      const baseDomain = process.env.SERVICE_EXTERNAL_BASE_DOMAIN || process.env.PROJECT_DOMAIN || "sarthiq.in";
+      const ingressConfigs = SERVICE_INGRESS_CONFIG[catalog.name] || [];
+      const ingressUrls = {}; // { suffix: fullUrl }
+      const isProd = process.env.NODE_ENV === "production";
+
+      for (const ic of ingressConfigs) {
+        const ingressName = `${kubeResName}-${ic.suffix}`;
+        const ingressHost = `${canonicalService}-${ic.suffix}.${baseDomain}`;
+        try {
+          const fullUrl = await createServiceIngress({
+            ingressName,
+            host: ingressHost,
+            backendServiceName: kubeResName,
+            backendPort: ic.port,
+            namespace: instance.namespace,
+            labels: standardLabels(instance.id, catalog.name, instance.ProjectId),
+          });
+          ingressUrls[ic.suffix] = fullUrl;
+          await appendLog(instance, `  → Ingress created: ${fullUrl}`);
+        } catch (ingErr) {
+          await appendLog(instance, `  ⚠ Ingress '${ingressHost}' creation failed: ${ingErr.message} (non-fatal)`);
+        }
+      }
+
       /* ── Step 5e (cont): Create NodePort for external access ──────── */
       // Per-service port mapping (includes secondary ports like console/management UIs)
       const SERVICE_PORTS = {
@@ -384,6 +431,20 @@ const serviceProvisionWorker = new Worker(
         await appendLog(instance, "  → External access disabled (skipping NodePort)");
       }
 
+      // Resolve internal/external hostnames before NodePort readback
+      // (needed to set MINIO_BROWSER_REDIRECT_URL etc.)
+      const hostDetails = generateServiceHost(
+        {
+          ...instance.toJSON(),
+          serviceType: catalog.name,
+          port: catalog.defaultPort,
+        },
+        process.env.APP_ENV || process.env.NODE_ENV,
+      );
+      const internalHost = hostDetails.internal_host;
+      const externalHost = hostDetails.external_host;
+      const fallbackHost = hostDetails.fallback_host;
+
       // Read back ALL auto-assigned NodePorts
       const externalPorts = {}; // { portName: nodePort }
       try {
@@ -395,12 +456,47 @@ const serviceProvisionWorker = new Worker(
           for (const p of (npSvc?.spec?.ports || [])) {
             if (p.nodePort) {
               externalPorts[p.name] = p.nodePort;
-              await appendLog(instance, `  → External ${p.name}: localhost:${p.nodePort}`);
+              await appendLog(instance, `  → External ${p.name}: ${externalHost || "host"}:${p.nodePort}`);
             }
           }
         }
       } catch {
         await appendLog(instance, "  ⚠ Could not read NodePort (non-fatal)");
+      }
+
+      // ── Patch service-specific env vars that depend on NodePort/Ingress ──
+      // MinIO needs MINIO_BROWSER_REDIRECT_URL for its console CSP headers.
+      // Prefer the Ingress URL (HTTPS), fall back to NodePort URL (HTTP).
+      if (catalog.name === "minio") {
+        const consoleUrl = ingressUrls.console || 
+          (externalPorts.console && externalHost ? `http://${externalHost}:${externalPorts.console}` : null);
+        if (consoleUrl) {
+          try {
+            await appsV1.patchNamespacedDeployment(
+              {
+                name: kubeResName,
+                namespace: instance.namespace,
+                body: {
+                  spec: {
+                    template: {
+                      spec: {
+                        containers: [{
+                          name: "minio",
+                          env: [{ name: "MINIO_BROWSER_REDIRECT_URL", value: consoleUrl }],
+                        }],
+                      },
+                    },
+                  },
+                },
+              },
+              undefined, undefined, undefined, undefined, undefined, undefined,
+              { headers: { "Content-Type": "application/strategic-merge-patch+json" } }
+            );
+            await appendLog(instance, `  → MinIO console redirect URL set: ${consoleUrl}`);
+          } catch (patchErr) {
+            await appendLog(instance, `  ⚠ Could not set MINIO_BROWSER_REDIRECT_URL: ${patchErr.message} (non-fatal)`);
+          }
+        }
       }
 
       /* ── Step 6: Wait for readiness ────────────────────────────── */
@@ -429,17 +525,6 @@ const serviceProvisionWorker = new Worker(
       }
 
       /* ── Step 7: Build + encrypt connection details ────────────── */
-      const hostDetails = generateServiceHost(
-        {
-          ...instance.toJSON(),
-          serviceType: catalog.name,
-          port: catalog.defaultPort,
-        },
-        process.env.APP_ENV || process.env.NODE_ENV,
-      );
-      const internalHost = hostDetails.internal_host;
-      const externalHost = hostDetails.external_host;
-      const fallbackHost = hostDetails.fallback_host;
 
       // Primary external port (first port in the map)
       const primaryPortName = servicePorts[0].name;
@@ -472,12 +557,24 @@ const serviceProvisionWorker = new Worker(
       }
 
       // Add secondary external ports (console, management, etc.)
+      // Prefer Ingress URLs (HTTPS) over NodePort URLs (HTTP)
       for (const sp of servicePorts.slice(1)) {
         const np = externalPorts[sp.name];
-        if (np) {
+        if (ingressUrls[sp.name]) {
+          // Ingress URL available — use HTTPS
+          connDetails[`${sp.name}Uri`] = ingressUrls[sp.name];
+          // Keep NodePort as fallback
+          if (np) connDetails[`${sp.name}Port`] = np;
+        } else if (np) {
+          // No Ingress — fall back to NodePort
           connDetails[`${sp.name}Port`] = np;
           connDetails[`${sp.name}Uri`] = `http://${externalHost}:${np}`;
         }
+      }
+
+      // Add primary Ingress URL if available
+      if (ingressUrls.api) {
+        connDetails.ingressUri = ingressUrls.api;
       }
 
       instance.connectionDetails = encrypt(JSON.stringify(connDetails));

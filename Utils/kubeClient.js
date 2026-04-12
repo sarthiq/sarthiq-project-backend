@@ -1124,10 +1124,129 @@ async function createOrUpdateNetworkPolicy(policy) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* CREATE: Service Ingress (HTTPS for service UIs like MinIO console) */
+/* ------------------------------------------------------------------ */
+/**
+ * Create or update an Ingress for a service UI (MinIO console, RabbitMQ mgmt, etc.)
+ * Routes HTTPS traffic through nginx Ingress with cert-manager TLS.
+ *
+ * @param {object} opts
+ * @param {string} opts.ingressName — Unique K8s resource name (e.g. "svc-minio-21-console")
+ * @param {string} opts.host — FQDN for the Ingress (e.g. "minio-5-console.sarthiq.in")
+ * @param {string} opts.backendServiceName — ClusterIP service to route to (e.g. "svc-minio-21")
+ * @param {number} opts.backendPort — Port on the backend service (e.g. 9001)
+ * @param {string} opts.namespace — Namespace of the backend service
+ * @param {object} opts.labels — Labels to apply to the Ingress
+ * @param {object} [opts.extraAnnotations] — Additional nginx annotations (e.g. proxy-body-size)
+ * @returns {string} The host FQDN
+ */
+async function createServiceIngress({
+  ingressName,
+  host,
+  backendServiceName,
+  backendPort,
+  namespace,
+  labels = {},
+  extraAnnotations = {},
+}) {
+  const isProd = process.env.NODE_ENV === "production";
+
+  const ingress = {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "Ingress",
+    metadata: {
+      name: ingressName,
+      namespace,
+      labels: { "managed-by": "sarthiq", "sarthiq.com/component": "service", ...labels },
+      annotations: {
+        "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
+        "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+        "nginx.ingress.kubernetes.io/proxy-http-version": "1.1",
+        "nginx.ingress.kubernetes.io/use-regex": "false",
+        // Allow large uploads for MinIO
+        "nginx.ingress.kubernetes.io/proxy-body-size": "0",
+        // WebSocket support (MinIO console uses WebSockets)
+        "nginx.ingress.kubernetes.io/proxy-set-headers": "ingress-nginx/custom-headers",
+        // Automatic HTTPS via cert-manager in production
+        ...(isProd && { "cert-manager.io/cluster-issuer": "letsencrypt-prod" }),
+        ...extraAnnotations,
+      },
+    },
+    spec: {
+      ingressClassName: "nginx",
+      ...(isProd && {
+        tls: [
+          {
+            hosts: [host],
+            secretName: `${ingressName}-tls`,
+          },
+        ],
+      }),
+      rules: [
+        {
+          host,
+          http: {
+            paths: [
+              {
+                path: "/",
+                pathType: "Prefix",
+                backend: {
+                  service: {
+                    name: backendServiceName,
+                    port: { number: backendPort },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  };
+
+  // Upsert: replace if exists, create if not
+  const existing = await networkingV1
+    .readNamespacedIngress({ name: ingressName, namespace })
+    .catch(() => null);
+
+  if (existing) {
+    await networkingV1.replaceNamespacedIngress({
+      name: ingressName,
+      namespace,
+      body: ingress,
+    });
+  } else {
+    await networkingV1.createNamespacedIngress({
+      namespace,
+      body: ingress,
+    });
+  }
+
+  const protocol = isProd ? "https" : "http";
+  return `${protocol}://${host}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* DELETE: Service Ingress                                              */
+/* ------------------------------------------------------------------ */
+async function deleteServiceIngress(ingressName, namespace) {
+  try {
+    await networkingV1.deleteNamespacedIngress({ name: ingressName, namespace });
+    console.log(`[kubeClient] ✓ Service Ingress '${ingressName}' deleted`);
+  } catch (err) {
+    if (err?.statusCode !== 404) {
+      console.warn(`[kubeClient] Service Ingress '${ingressName}' delete warning:`, err?.body?.message || err.message);
+    }
+  }
+}
+
 module.exports = {
   createDeployment,
   createService,
   createIngress,
+  createServiceIngress,
+  deleteServiceIngress,
   createOrUpdateConfigMap,
   createOrUpdateNetworkPolicy,
   scaleDeployment,
