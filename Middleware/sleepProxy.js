@@ -387,14 +387,15 @@ function getOrCreateServiceProxy(subdomain, clusterIP, port) {
 
   const proxy = createProxyMiddleware({
     target,
-    // CRITICAL: Keep the original Host header (e.g., minio-31-console.sarthiq.in)
-    // If changeOrigin is true, MinIO sees Host:clusterIP and sets session cookies
-    // for the wrong domain → browser can't send cookies back → 403 on /api/v1/session
-    changeOrigin: false,
+    changeOrigin: true,
     ws: true,
+    // Rewrite cookie domains — MinIO sets cookies for its internal hostname,
+    // but the browser is at minio-31-console.sarthiq.in. Stripping the domain
+    // makes cookies default to the page's origin (correct behavior).
+    cookieDomainRewrite: "",
     on: {
       proxyReq: (proxyReq, req) => {
-        // Forward proper reverse proxy headers so MinIO knows it's behind HTTPS
+        // Forward proper reverse proxy headers so MinIO knows the real client
         proxyReq.setHeader("X-Forwarded-Proto", "https");
         proxyReq.setHeader("X-Forwarded-Host", req.headers.host || subdomain);
         if (req.ip || req.connection?.remoteAddress) {
@@ -406,6 +407,15 @@ function getOrCreateServiceProxy(subdomain, clusterIP, port) {
         // that violate its own CSP. Removing CSP allows them to load.
         delete proxyRes.headers["content-security-policy"];
         delete proxyRes.headers["content-security-policy-report-only"];
+
+        // Also ensure cookies don't have Secure flag issues when behind proxy
+        const setCookie = proxyRes.headers["set-cookie"];
+        if (setCookie) {
+          proxyRes.headers["set-cookie"] = setCookie.map(c =>
+            c.replace(/;\s*Secure/gi, "")      // Remove Secure (proxy handles TLS)
+              .replace(/;\s*SameSite=\w+/gi, "") // Remove SameSite restrictions
+          );
+        }
       },
       error: (err, req, res) => {
         console.error(`[sleepProxy] Service proxy error for ${subdomain}: ${err.message}`);
