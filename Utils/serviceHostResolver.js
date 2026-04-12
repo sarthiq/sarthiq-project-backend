@@ -8,7 +8,8 @@ function canonicalServiceName(serviceType, projectId) {
 }
 
 function canonicalNamespace(projectId) {
-  return `project-${projectId}`;
+  // All user workloads (projects, services, cron jobs) share one namespace
+  return process.env.K8S_NAMESPACE || "sarthiq-apps";
 }
 
 function resolveEnvironment(environment = process.env.APP_ENV || process.env.NODE_ENV) {

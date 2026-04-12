@@ -230,14 +230,10 @@ module.exports = {
           });
         }
 
-        // ── 3. Delete K8s namespace for this project ─────────────
-        const namespace = `project-${projectId}`;
-        try {
-          await deleteNamespace(namespace);
-          console.log(`[deleteProject] Deleted namespace ${namespace}`);
-        } catch (nsErr) {
-          console.warn(`[deleteProject] Namespace cleanup skipped: ${nsErr.message}`);
-        }
+        // ── 3. Namespace cleanup ─────────────────────────────────
+        // Services now run in the shared sarthiq-apps namespace,
+        // so we do NOT delete a per-project namespace here.
+        // Service K8s resources are cleaned up via ServiceInstance deletion below.
 
         // ── 4. Release KubeNode capacity if assigned ─────────────
         const dockerInfo = await DockerInfo.findOne({ where: { ProjectId: projectId } });

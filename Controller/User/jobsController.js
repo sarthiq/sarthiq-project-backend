@@ -9,7 +9,7 @@ const CronJobInstance = require("../../Models/Services/cronJobInstance");
 const Project = require("../../Models/Projects/projects");
 const { checkCronJobCreationAllowed } = require("../../Utils/planEnforcer");
 const { buildCronJobResources } = require("../../Utils/kubeServiceBuilder");
-const { ensureNamespace } = require("../../Utils/kubeClient");
+const { ensureNamespace, NAMESPACE } = require("../../Utils/kubeClient");
 
 const k8s = require("@kubernetes/client-node");
 const kc = new k8s.KubeConfig();
@@ -68,7 +68,7 @@ exports.createJob = async (req, res) => {
     }
 
     // Build K8s CronJob spec
-    const namespace = `sarthiq-svc-${projectId}`;
+    const namespace = NAMESPACE;
     await ensureNamespace(namespace);
 
     const { cronJob, kubeResourceName } = buildCronJobResources({

@@ -1,4 +1,4 @@
-const { getNodes, getPods, getNodeMetrics, getPodMetrics } = require("../../Utils/kubeClient");
+const { getNodes, getPods, getNodeMetrics, getPodMetrics, NAMESPACE } = require("../../Utils/kubeClient");
 const Project = require("../../Models/Projects/projects");
 
 /* ── Parsing helpers ────────────────────────────────────────────────── */
@@ -38,7 +38,11 @@ function formatStorage(raw) {
   return gi >= 1 ? `${gi.toFixed(1)}Gi` : `${Math.round(gi * 1024)}Mi`;
 }
 
-const SYSTEM_NAMESPACES = ["kube-system", "kube-public", "kube-node-lease", "ingress-nginx", "default", "cert-manager"];
+const SYSTEM_NAMESPACES = [
+  "kube-system", "kube-public", "kube-node-lease", "ingress-nginx",
+  "default", "cert-manager", "local-path-storage", "calico-system",
+  "tigera-operator", "metallb-system",
+];
 
 /* ── GET /admin/k8s/nodes ───────────────────────────────────────────── */
 exports.getAdminNodes = async (req, res) => {
@@ -58,6 +62,11 @@ exports.getAdminNodes = async (req, res) => {
       const capacityStorageRaw = node.status?.capacity?.["ephemeral-storage"] || "0";
       const allocStorageGi = parseStorageToGi(allocStorageRaw);
       const capacityStorageGi = parseStorageToGi(capacityStorageRaw);
+      // Storage overhead = capacity - allocatable (reserved for system)
+      const storageOverheadGi = Math.max(0, capacityStorageGi - allocStorageGi);
+      const storageUsagePct = capacityStorageGi > 0
+        ? Math.min(100, Math.round((storageOverheadGi / capacityStorageGi) * 100))
+        : 0;
       const capacityPods = parseInt(node.status?.allocatable?.pods || "110");
 
       const readyCondition = (node.status?.conditions || []).find(c => c.type === "Ready");
@@ -94,6 +103,7 @@ exports.getAdminNodes = async (req, res) => {
         usagePercent: {
           cpu: allocCpu > 0 ? Math.min(100, Math.round((usageCpu / allocCpu) * 100)) : 0,
           memory: allocMem > 0 ? Math.min(100, Math.round((usageMem / allocMem) * 100)) : 0,
+          storage: storageUsagePct,
           pods: capacityPods > 0 ? Math.round((nodePods.length / capacityPods) * 100) : 0,
         },
         podsCount: nodePods.length,
@@ -142,7 +152,9 @@ exports.getAdminPods = async (req, res) => {
       }
 
       const ns = pod.metadata?.namespace || "";
-      const isSystem = SYSTEM_NAMESPACES.includes(ns);
+      // All user workloads run in NAMESPACE (sarthiq-apps).
+      // Everything else is a system/infrastructure pod.
+      const isSystem = ns !== NAMESPACE;
 
       return {
         name: pod.metadata?.name,

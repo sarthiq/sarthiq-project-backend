@@ -69,6 +69,12 @@ const KNOWN_ADDONS = [
     description: "Dynamically provisions persistent volumes for pods that need persistent storage (databases, file uploads, etc.).",
     namespace: "kube-system",
     detectDeployment: "storage-provisioner",
+    // Alternative detection strategies for different cluster setups
+    alternativeDetections: [
+      { namespace: "kube-system", detectLabel: "component=storage-provisioner" },  // Docker Desktop
+      { namespace: "local-path-storage", detectDeployment: "local-path-provisioner" },  // Rancher/k3s
+      { namespace: "kube-system", detectLabel: "app=local-path-provisioner" },
+    ],
     category: "storage",
     importance: "recommended",
     consequences: "Pods that request PersistentVolumeClaims won't get storage assigned automatically. Manual provisioning would be needed.",
@@ -86,14 +92,14 @@ const KNOWN_ADDONS = [
 ];
 
 /* ── Detect if an addon is installed ────────────────────────────────── */
-async function detectAddon(addon) {
+async function detectSingleConfig(cfg) {
   try {
-    if (addon.detectDeployment) {
+    if (cfg.detectDeployment) {
       // Try as Deployment
       try {
         const dep = await appsV1.readNamespacedDeployment({
-          name: addon.detectDeployment,
-          namespace: addon.namespace,
+          name: cfg.detectDeployment,
+          namespace: cfg.namespace,
         });
         if (dep) {
           const replicas = dep.status?.readyReplicas || 0;
@@ -103,14 +109,15 @@ async function detectAddon(addon) {
             healthy: replicas >= desired,
             replicas: `${replicas}/${desired}`,
             version: dep.metadata?.labels?.["app.kubernetes.io/version"] || dep.spec?.template?.spec?.containers?.[0]?.image?.split(":")?.[1] || "unknown",
+            namespace: cfg.namespace,
           };
         }
       } catch {
         // Not a deployment, try DaemonSet
         try {
           const ds = await appsV1.readNamespacedDaemonSet({
-            name: addon.detectDeployment,
-            namespace: addon.namespace,
+            name: cfg.detectDeployment,
+            namespace: cfg.namespace,
           });
           if (ds) {
             const ready = ds.status?.numberReady || 0;
@@ -120,6 +127,7 @@ async function detectAddon(addon) {
               healthy: ready >= desired,
               replicas: `${ready}/${desired}`,
               version: ds.metadata?.labels?.["app.kubernetes.io/version"] || "unknown",
+              namespace: cfg.namespace,
             };
           }
         } catch {
@@ -128,10 +136,10 @@ async function detectAddon(addon) {
       }
     }
 
-    if (addon.detectLabel) {
+    if (cfg.detectLabel) {
       const pods = await coreV1.listNamespacedPod({
-        namespace: addon.namespace,
-        labelSelector: addon.detectLabel,
+        namespace: cfg.namespace,
+        labelSelector: cfg.detectLabel,
       });
       if (pods.items && pods.items.length > 0) {
         const running = pods.items.filter(p => p.status?.phase === "Running").length;
@@ -140,14 +148,31 @@ async function detectAddon(addon) {
           healthy: running > 0,
           replicas: `${running}/${pods.items.length}`,
           version: "detected",
+          namespace: cfg.namespace,
         };
       }
     }
 
-    return { installed: false, healthy: false, replicas: "0/0", version: null };
+    return null; // Not found with this config
   } catch {
-    return { installed: false, healthy: false, replicas: "0/0", version: null };
+    return null;
   }
+}
+
+async function detectAddon(addon) {
+  // Try primary detection
+  const primary = await detectSingleConfig(addon);
+  if (primary) return primary;
+
+  // Try alternative detection strategies if defined
+  if (addon.alternativeDetections) {
+    for (const alt of addon.alternativeDetections) {
+      const result = await detectSingleConfig(alt);
+      if (result) return result;
+    }
+  }
+
+  return { installed: false, healthy: false, replicas: "0/0", version: null };
 }
 
 /* ── Execute kubectl command ────────────────────────────────────────── */
@@ -175,9 +200,12 @@ exports.getAddons = async (req, res) => {
     const results = [];
     for (const addon of KNOWN_ADDONS) {
       const detection = await detectAddon(addon);
+      // Use detected namespace if the addon was found in an alternative location
+      const effectiveNamespace = detection.namespace || addon.namespace;
       results.push({
         ...addon,
         ...detection,
+        namespace: effectiveNamespace,
         canInstall: !!addon.installCmd || !!addon.installUrl,
         canUninstall: detection.installed && addon.importance !== "critical",
       });

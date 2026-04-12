@@ -283,6 +283,44 @@ async function getPodNetworkStats(podName, namespace) {
   }
 }
 
+/* ---- Read disk usage via `df /` inside the pod via kubectl exec ---- */
+async function getPodDiskUsage(podName, namespace) {
+  try {
+    const { stdout } = await execFileAsync("kubectl", [
+      "exec", podName,
+      "-n", namespace,
+      "--", "df", "-BM", "/"
+    ], { timeout: 5000 });
+
+    // Parse df output:
+    // Filesystem     1M-blocks  Used Available Use% Mounted on
+    // overlay           95385M  6234M    84254M   7% /
+    const lines = stdout.trim().split("\n");
+    if (lines.length >= 2) {
+      const parts = lines[1].trim().split(/\s+/);
+      // parts[1] = total (e.g. "95385M"), parts[2] = used (e.g. "6234M")
+      const totalMi = parseInt(parts[1]) || 0;
+      const usedMi = parseInt(parts[2]) || 0;
+      return { usedMi, totalMi, available: true };
+    }
+    return { usedMi: 0, totalMi: 0, available: false };
+  } catch {
+    // df not available in container (scratch/distroless) — try /proc approach
+    try {
+      const { stdout } = await execFileAsync("kubectl", [
+        "exec", podName,
+        "-n", namespace,
+        "--", "cat", "/proc/mounts"
+      ], { timeout: 3000 });
+      // If we can read /proc/mounts, the container is accessible but df isn't installed
+      // Return unavailable with a note
+      return { usedMi: 0, totalMi: 0, available: false };
+    } catch {
+      return { usedMi: 0, totalMi: 0, available: false };
+    }
+  }
+}
+
 /**
  * Get pod resource metrics (CPU + Memory + Storage + Network) with limits.
  *
@@ -296,30 +334,19 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
   const normalizedCpuLimit = normalizeCpuUnit(dockerInfo.cpu);
   const diskLimitMi = parseDiskToMi(dockerInfo.disk || "1Gi");
   
-  // Fetch CPU/Memory from metrics-server + network concurrently
-  const [metricsResult, networkStats] = await Promise.allSettled([
+  // Fetch CPU/Memory from metrics-server + network + disk usage concurrently
+  const [metricsResult, networkStats, diskStats] = await Promise.allSettled([
     metricsClient.getPodMetrics(NAMESPACE),
     getPodNetworkStats(podName, NAMESPACE),
+    getPodDiskUsage(podName, NAMESPACE),
   ]);
 
-  // Fetch pod status for ephemeral storage usage
-  let storageUsedMi = 0;
-  try {
-    const podList = await coreV1.listNamespacedPod({
-      namespace: NAMESPACE,
-      fieldSelector: `metadata.name=${podName}`,
-    });
-    const pod = podList.items?.[0];
-    const ephemeralUsage = pod?.status?.ephemeralContainerStatuses?.[0]
-      || pod?.status?.containerStatuses?.[0];
-    // K8s exposes ephemeralStorage in pod.status.containerStatuses[].allocatedResources
-    const allocResources = ephemeralUsage?.allocatedResources?.["ephemeral-storage"];
-    if (allocResources) {
-      storageUsedMi = parseDiskToMi(allocResources);
-    }
-  } catch {
-    storageUsedMi = 0;
-  }
+  // Extract disk usage
+  const diskResult = diskStats.status === "fulfilled" ? diskStats.value : { usedMi: 0, totalMi: 0, available: false };
+  // Use actual disk total from df if available, otherwise fall back to DockerInfo limit
+  const effectiveDiskLimitMi = diskResult.available && diskResult.totalMi > 0 ? diskResult.totalMi : diskLimitMi;
+  const storageUsedMi = diskResult.usedMi;
+  const storagePct = effectiveDiskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / effectiveDiskLimitMi) * 100)) : 0;
 
   const netStats = networkStats.status === "fulfilled" ? networkStats.value :
     { rxBytes: 0, txBytes: 0, rxMB: 0, txMB: 0, rxPackets: 0, txPackets: 0, available: false };
@@ -334,7 +361,7 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
     return {
       cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
       memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
-      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      storage: { usedMi: storageUsedMi, limitMi: effectiveDiskLimitMi, used: `${storageUsedMi}Mi`, limit: `${effectiveDiskLimitMi}Mi`, percentage: storagePct },
       network: netStats,
       available: false,
       message: "Metrics server unavailable — install metrics-server addon",
@@ -348,7 +375,7 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
     return {
       cpu: { used: "0m", limit: normalizedCpuLimit, usedMillicores: 0, limitMillicores: parseCpuToMillicores(normalizedCpuLimit), percentage: 0 },
       memory: { used: "0Mi", limit: normalizedMemLimit, usedMi: 0, limitMi: parseMemoryToMi(normalizedMemLimit), percentage: 0 },
-      storage: { usedMi: storageUsedMi, limitMi: diskLimitMi, used: `${storageUsedMi}Mi`, limit: `${diskLimitMi}Mi`, percentage: diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0 },
+      storage: { usedMi: storageUsedMi, limitMi: effectiveDiskLimitMi, used: `${storageUsedMi}Mi`, limit: `${effectiveDiskLimitMi}Mi`, percentage: storagePct },
       network: netStats,
       available: false,
       message: "Metrics not yet available (pod may have just started)",
@@ -364,9 +391,6 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
   const cpuLimitMilli = parseCpuToMillicores(normalizedCpuLimit);
   const memUsedMi = parseMemoryToMi(memUsed);
   const memLimitMi = parseMemoryToMi(normalizedMemLimit);
-
-  // Storage percentage (of quota/limit)
-  const storagePct = diskLimitMi > 0 ? Math.min(100, Math.round((storageUsedMi / diskLimitMi) * 100)) : 0;
 
   return {
     cpu: {
@@ -385,9 +409,9 @@ async function getPodMetrics(podName, containerName, dockerInfo) {
     },
     storage: {
       used: `${storageUsedMi}Mi`,
-      limit: `${diskLimitMi}Mi`,
+      limit: `${effectiveDiskLimitMi}Mi`,
       usedMi: storageUsedMi,
-      limitMi: diskLimitMi,
+      limitMi: effectiveDiskLimitMi,
       percentage: storagePct,
     },
     network: netStats,

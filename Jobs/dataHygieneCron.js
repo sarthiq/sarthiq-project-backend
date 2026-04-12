@@ -199,8 +199,9 @@ async function runDataHygiene() {
   }
 
   // ── 8. Clean orphaned K8s namespaces ──────────────────────────────
+  // Legacy: services used to be provisioned in project-{id} and sarthiq-svc-{id}
+  // namespaces. Now all workloads go to sarthiq-apps. Clean up orphans.
   try {
-    const { getNodes } = require("../Utils/kubeClient");
     const k8s = require("@kubernetes/client-node");
     const kc = new k8s.KubeConfig();
     kc.loadFromDefault();
@@ -209,10 +210,14 @@ async function runDataHygiene() {
     const nsList = await coreV1.listNamespace();
     const namespaces = (nsList.items || []).map((ns) => ns.metadata.name);
 
-    const projectNs = namespaces.filter((ns) => /^project-\d+$/.test(ns));
-    for (const ns of projectNs) {
-      const projId = parseInt(ns.replace("project-", ""));
-      const project = await Project.findByPk(projId);
+    // Match both legacy patterns: project-{id} and sarthiq-svc-{id}
+    const legacyNs = namespaces.filter((ns) =>
+      /^project-\d+$/.test(ns) || /^sarthiq-svc-\d+$/.test(ns)
+    );
+    for (const ns of legacyNs) {
+      const idMatch = ns.match(/(\d+)$/);
+      const projId = idMatch ? parseInt(idMatch[1]) : null;
+      const project = projId ? await Project.findByPk(projId) : null;
       if (!project) {
         // Project doesn't exist — this namespace is orphaned
         try {

@@ -110,7 +110,8 @@ exports.createService = async (req, res) => {
     const instanceName = projectId
       ? `${serviceType}-${projectId}-${instanceSuffix}`
       : `${serviceType}-standalone-${instanceSuffix}`;
-    const namespace = projectId ? `project-${projectId}` : `user-${userId}-svc`;
+    const { NAMESPACE } = require("../../Utils/kubeClient");
+    const namespace = NAMESPACE;
 
     // Create ServiceInstance record
     const instance = await ServiceInstance.create({
