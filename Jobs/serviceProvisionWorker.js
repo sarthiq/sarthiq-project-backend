@@ -291,35 +291,47 @@ const serviceProvisionWorker = new Worker(
       }
 
       // 5c. PVC (for Deployment-based services with standalone PVC)
+      // NOTE: With WaitForFirstConsumer StorageClass binding mode (used by
+      // local-path-provisioner and many CSI drivers), PVCs do NOT bind until
+      // a Pod referencing them is scheduled to a node. Therefore we must NOT
+      // block waiting for PVC binding before creating the Deployment/StatefulSet.
       if (k8sResources.pvc) {
         await applyResource("PersistentVolumeClaim", k8sResources.pvc, instance.namespace);
-        await appendLog(instance, "  → PVC created");
-
-        // Wait for PVC to bind before proceeding
-        const pvcName = k8sResources.pvc.metadata.name;
         const storageClass = k8sResources.pvc.spec?.storageClassName || "(cluster default)";
-        await appendLog(instance, `  → Waiting for PVC '${pvcName}' to bind (storageClass: ${storageClass})...`);
-        const pvcResult = await waitForPvcBound(pvcName, instance.namespace, 120_000);
-        if (!pvcResult.bound) {
-          throw new Error(
-            `PVC '${pvcName}' stuck in Pending after 120s. StorageClass: ${storageClass}. ` +
-            `This usually means no StorageClass provisioner is running on the cluster. ` +
-            `Fix: (1) kubectl get sc — check if a StorageClass exists and is marked (default). ` +
-            `(2) If not, install one: kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml ` +
-            `(3) Set as default: kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' ` +
-            `(4) Verify provisioner pods: kubectl -n local-path-storage get pods`
-          );
-        }
-        await appendLog(instance, "  → PVC bound successfully");
+        await appendLog(instance, `  → PVC created (storageClass: ${storageClass})`);
       }
 
       // 5d. StatefulSet or Deployment
+      // This must happen BEFORE any PVC bind check — pod scheduling triggers
+      // WaitForFirstConsumer PVC binding.
       if (k8sResources.statefulSet) {
         await applyResource("StatefulSet", k8sResources.statefulSet, instance.namespace);
         await appendLog(instance, "  → StatefulSet created");
       } else if (k8sResources.deployment) {
         await applyResource("Deployment", k8sResources.deployment, instance.namespace);
         await appendLog(instance, "  → Deployment created");
+      }
+
+      // 5d-ii. Verify PVC binds after workload is created (pod scheduling
+      // triggers WaitForFirstConsumer binding). This is a non-blocking check
+      // with a generous timeout — if it fails, waitForReady will also fail
+      // with detailed pod diagnostics.
+      if (k8sResources.pvc) {
+        const pvcName = k8sResources.pvc.metadata.name;
+        const storageClass = k8sResources.pvc.spec?.storageClassName || "(cluster default)";
+        await appendLog(instance, `  → Waiting for PVC '${pvcName}' to bind...`);
+        const pvcResult = await waitForPvcBound(pvcName, instance.namespace, 120_000);
+        if (!pvcResult.bound) {
+          throw new Error(
+            `PVC '${pvcName}' stuck in Pending after 120s. StorageClass: ${storageClass}. ` +
+            `The Deployment/StatefulSet was created but the PVC did not bind. ` +
+            `Possible causes: (1) No StorageClass provisioner running — kubectl -n local-path-storage get pods. ` +
+            `(2) StorageClass '${storageClass}' does not exist — kubectl get sc. ` +
+            `(3) Node has no available storage. ` +
+            `(4) Pod was not scheduled (check pod events).`
+          );
+        }
+        await appendLog(instance, "  → PVC bound successfully");
       }
 
       // 5e. Service
