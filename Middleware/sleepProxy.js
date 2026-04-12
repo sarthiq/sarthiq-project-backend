@@ -366,6 +366,55 @@ function getOrCreateProxy(subdomain, clusterIP, port) {
   return proxy;
 }
 
+/* ── Service proxy factory (strips CSP headers) ────────────────── */
+// Used for infrastructure services like MinIO console, RabbitMQ mgmt.
+// These services send CSP headers that block their own blob: web workers.
+// By stripping CSP at the proxy layer, the UIs load correctly.
+function getOrCreateServiceProxy(subdomain, clusterIP, port) {
+  const cacheKey = `svc:${subdomain}:${clusterIP}:${port}`;
+  if (proxyCache.has(cacheKey)) {
+    return proxyCache.get(cacheKey);
+  }
+
+  // Invalidate old proxy for this subdomain
+  for (const [key] of proxyCache) {
+    if (key.startsWith(`svc:${subdomain}:`)) {
+      proxyCache.delete(key);
+    }
+  }
+
+  const target = `http://${clusterIP}:${port}`;
+
+  const proxy = createProxyMiddleware({
+    target,
+    changeOrigin: true,
+    ws: true,
+    on: {
+      proxyRes: (proxyRes) => {
+        // Strip CSP headers — MinIO console uses blob: URLs for web workers
+        // that violate its own CSP. Removing CSP allows them to load.
+        delete proxyRes.headers["content-security-policy"];
+        delete proxyRes.headers["content-security-policy-report-only"];
+      },
+      error: (err, req, res) => {
+        console.error(`[sleepProxy] Service proxy error for ${subdomain}: ${err.message}`);
+        if (res.writeHead) {
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "text/plain" });
+            res.end("Service proxy error. Retrying...");
+          }
+        } else if (res.write) {
+          res.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+          res.end();
+        }
+      },
+    },
+  });
+
+  proxyCache.set(cacheKey, proxy);
+  return proxy;
+}
+
 /* ── Main middleware factory ────────────────────────────────────── */
 async function sleepProxyHandler(req, res, next) {
   // Use subdomain parsed by subdomainParser middleware
@@ -442,7 +491,7 @@ async function sleepProxyHandler(req, res, next) {
       }
 
       console.log(`[sleepProxy] 🔧 Service proxy: ${subdomain} → ${clusterIP}:${targetPort}`);
-      const proxy = getOrCreateProxy(subdomain, clusterIP, targetPort);
+      const proxy = getOrCreateServiceProxy(subdomain, clusterIP, targetPort);
       return proxy(req, res, next);
     } catch (err) {
       console.error(`[sleepProxy] Service proxy error for ${subdomain}: ${err.message}`);
