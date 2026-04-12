@@ -32,6 +32,13 @@ kc.loadFromDefault();
 const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
 const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
 
+/* ── Helper: extract status code from K8s client errors ────────────── */
+// The K8s client SDK can nest the status code in different locations
+// depending on the error type and client version.
+function k8sStatusCode(err) {
+  return err?.statusCode || err?.response?.statusCode || err?.body?.code || null;
+}
+
 /* ── POST /api/services/create ─────────────────────────────────────── */
 exports.createService = async (req, res) => {
   try {
@@ -202,7 +209,7 @@ exports.deleteService = async (req, res) => {
         });
         console.log(`[serviceController] ✓ StatefulSet '${kubeResName}' deleted from '${namespace}'`);
       } catch (ssErr) {
-        if (ssErr?.statusCode !== 404) {
+        if (k8sStatusCode(ssErr) !== 404) {
           console.log(`[serviceController] StatefulSet not found, trying Deployment...`);
         }
         try {
@@ -213,25 +220,28 @@ exports.deleteService = async (req, res) => {
           });
           console.log(`[serviceController] ✓ Deployment '${kubeResName}' deleted from '${namespace}'`);
         } catch (depErr) {
-          if (depErr?.statusCode !== 404) {
+          if (k8sStatusCode(depErr) !== 404) {
             console.error(`[serviceController] ✗ Failed to delete workload '${kubeResName}':`, depErr?.body?.message || depErr.message);
           }
         }
       }
 
       // Delete Services (ClusterIP + NodePort)
-      const serviceNames = [
-        kubeResName,
-        `${kubeResName}-external`,
-        canonicalService,
-        `${canonicalService}-external`,
-      ];
+      // Build a unique list of service names to attempt deletion for.
+      // Avoid duplicates by using a Set.
+      const serviceNames = new Set([
+        kubeResName,                      // e.g. svc-minio-21
+        `${kubeResName}-external`,        // e.g. svc-minio-21-external
+        canonicalService,                 // e.g. minio-5
+        `${canonicalService}-external`,   // e.g. minio-5-external
+      ]);
       for (const svcName of serviceNames) {
         try {
           await coreV1.deleteNamespacedService({ name: svcName, namespace });
           console.log(`[serviceController] ✓ Service '${svcName}' deleted`);
         } catch (svcErr) {
-          if (svcErr?.statusCode !== 404) {
+          // 404 is expected — not all naming variants exist for every service
+          if (k8sStatusCode(svcErr) !== 404) {
             console.warn(`[serviceController] Service '${svcName}' delete warning:`, svcErr?.body?.message || svcErr.message);
           }
         }
@@ -241,16 +251,18 @@ exports.deleteService = async (req, res) => {
       try {
         await coreV1.deleteNamespacedSecret({ name: `${kubeResName}-secret`, namespace });
       } catch (secErr) {
-        if (secErr?.statusCode !== 404) {
+        // 404 is expected if secret was never created (e.g. provisioning failed early)
+        if (k8sStatusCode(secErr) !== 404) {
           console.warn(`[serviceController] Secret delete warning:`, secErr?.body?.message || secErr.message);
         }
       }
 
-      // Delete ConfigMap
+      // Delete ConfigMap (only some services create one — 404 is expected and normal)
       try {
         await coreV1.deleteNamespacedConfigMap({ name: `${kubeResName}-config`, namespace });
       } catch (cmErr) {
-        if (cmErr?.statusCode !== 404) {
+        // Silently ignore 404 — most services don't create a ConfigMap
+        if (k8sStatusCode(cmErr) !== 404) {
           console.warn(`[serviceController] ConfigMap delete warning:`, cmErr?.body?.message || cmErr.message);
         }
       }
@@ -264,17 +276,28 @@ exports.deleteService = async (req, res) => {
         });
         for (const pvc of (pvcList.items || [])) {
           const pvcName = pvc.metadata.name;
-          await coreV1.patchNamespacedPersistentVolumeClaim(
-            { name: pvcName, namespace, body: [
-              { op: "add", path: "/metadata/annotations/sarthiq.com~1delete-after", value: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
-            ] },
-            undefined, undefined, undefined, undefined, undefined, undefined,
-            { headers: { "Content-Type": "application/json-patch+json" } }
-          );
+          try {
+            await coreV1.patchNamespacedPersistentVolumeClaim(
+              { name: pvcName, namespace, body: [
+                { op: "add", path: "/metadata/annotations/sarthiq.com~1delete-after", value: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+              ] },
+              undefined, undefined, undefined, undefined, undefined, undefined,
+              { headers: { "Content-Type": "application/json-patch+json" } }
+            );
+          } catch (patchErr) {
+            // 404 = PVC already gone, 422 = patch format issue — both non-fatal
+            const code = k8sStatusCode(patchErr);
+            if (code !== 404 && code !== 422) {
+              console.warn(`[serviceController] PVC '${pvcName}' annotation patch warning:`, patchErr?.body?.message || patchErr.message);
+            }
+          }
         }
       } catch (pvcErr) {
         // Non-fatal — PVC cleanup is best-effort
-        console.warn("[serviceController] PVC label error:", pvcErr.message);
+        const code = k8sStatusCode(pvcErr);
+        if (code !== 404) {
+          console.warn("[serviceController] PVC label error:", pvcErr?.body?.message || pvcErr.message);
+        }
       }
 
       console.log(`[serviceController] ✅ K8s resources deleted for ${kubeResName} in ${namespace}`);

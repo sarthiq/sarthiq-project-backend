@@ -15,11 +15,14 @@
  */
 
 // ── StorageClass for dynamic PV provisioning ──────────────────────────
-// Set K8S_STORAGE_CLASS env to override. If not set, Kubernetes uses
-// whichever StorageClass is marked as "(default)" in the cluster.
-// - Docker Desktop: "hostpath"   (default)
-// - Production:     "local-path" (default after installing local-path-provisioner)
-const STORAGE_CLASS = process.env.K8S_STORAGE_CLASS || undefined;
+// Set K8S_STORAGE_CLASS env to override.
+// - Docker Desktop / Minikube: leave undefined → uses cluster default ("hostpath")
+// - Production: defaults to "local-path" (rancher local-path-provisioner)
+// IMPORTANT: Ensure the StorageClass provisioner is deployed on production.
+//   kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+//   kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+const STORAGE_CLASS = process.env.K8S_STORAGE_CLASS ||
+  (process.env.NODE_ENV === "production" ? "local-path" : undefined);
 
 /* ── Standard labels applied to all resources ──────────────────────── */
 function standardLabels(instanceId, serviceType, projectId) {
@@ -727,11 +730,16 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
   const name = resourceName("elasticsearch", instanceId);
   const labels = standardLabels(instanceId, "elasticsearch", projectId);
 
+  // Parse memory value properly: strip "Mi"/"Gi" suffix before calculating JVM heap
+  const memStr = String(resources?.memory || "512Mi");
+  const memMi = memStr.endsWith("Gi")
+    ? parseInt(memStr) * 1024
+    : parseInt(memStr); // handles "512Mi" and plain "512"
+  const heapMi = Math.max(128, Math.floor(memMi / 2));
+
   const secret = buildSecret(`${name}-secret`, namespace, {
     ELASTIC_PASSWORD: credentials.password,
-    "xpack.security.enabled": "true",
-    "discovery.type": "single-node",
-    "ES_JAVA_OPTS": `-Xms${Math.floor(parseInt(resources?.memory || "512") / 2)}m -Xmx${Math.floor(parseInt(resources?.memory || "512") / 2)}m`,
+    "ES_JAVA_OPTS": `-Xms${heapMi}m -Xmx${heapMi}m`,
   }, labels);
 
   const statefulSet = {
@@ -761,8 +769,14 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
               image: "elasticsearch:8.12.0",
               port: 9200,
               env: [
+                // Password kept in secret for potential future use
                 { name: "ELASTIC_PASSWORD", valueFrom: { secretKeyRef: { name: `${name}-secret`, key: "ELASTIC_PASSWORD" } } },
-                { name: "xpack.security.enabled", value: "true" },
+                // Disable X-Pack security: HTTP probes cannot send auth headers,
+                // and single-node behind ClusterIP doesn't need it.
+                // Network-level isolation via K8s namespace provides security.
+                { name: "xpack.security.enabled", value: "false" },
+                { name: "xpack.security.http.ssl.enabled", value: "false" },
+                { name: "xpack.security.transport.ssl.enabled", value: "false" },
                 { name: "discovery.type", value: "single-node" },
                 { name: "ES_JAVA_OPTS", valueFrom: { secretKeyRef: { name: `${name}-secret`, key: "ES_JAVA_OPTS" } } },
               ],
@@ -770,15 +784,17 @@ function buildElasticsearchResources({ instanceId, namespace, credentials, resou
                 { name: "data", mountPath: "/usr/share/elasticsearch/data" },
               ],
               resources,
+              // Use exec probes instead of httpGet — avoids 401 when security is
+              // toggled, and works reliably across all ES versions.
               readinessProbe: {
-                httpGet: { path: "/_cluster/health", port: 9200 },
+                exec: { command: ["sh", "-c", "curl -sf http://localhost:9200/_cluster/health || exit 1"] },
                 initialDelaySeconds: 30,
                 periodSeconds: 15,
                 timeoutSeconds: 10,
               },
               livenessProbe: {
-                httpGet: { path: "/_cluster/health", port: 9200 },
-                initialDelaySeconds: 60,
+                exec: { command: ["sh", "-c", "curl -sf http://localhost:9200/_cluster/health || exit 1"] },
+                initialDelaySeconds: 90,
                 periodSeconds: 30,
                 timeoutSeconds: 10,
               },

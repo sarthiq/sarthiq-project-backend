@@ -70,16 +70,34 @@ async function appendLog(instance, line) {
 }
 
 /* ── Helper: wait for PVC to bind (with clear timeout error) ──────── */
-async function waitForPvcBound(pvcName, namespace, timeoutMs = 60_000) {
+async function waitForPvcBound(pvcName, namespace, timeoutMs = 120_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
       const pvc = await coreV1.readNamespacedPersistentVolumeClaim({ name: pvcName, namespace });
-      if (pvc.status?.phase === "Bound") return true;
+      const phase = pvc.status?.phase;
+      if (phase === "Bound") return { bound: true };
+      // Collect diagnostic info for better error messages
+      if (Date.now() - start > 30_000 && phase === "Pending") {
+        // Check if there are events explaining why PVC is stuck
+        try {
+          const events = await coreV1.listNamespacedEvent({
+            namespace,
+            fieldSelector: `involvedObject.name=${pvcName},involvedObject.kind=PersistentVolumeClaim`,
+          });
+          const warnings = (events.items || [])
+            .filter(e => e.type === "Warning")
+            .map(e => e.message)
+            .slice(-3);
+          if (warnings.length > 0) {
+            console.log(`[serviceProvision] PVC '${pvcName}' pending — events: ${warnings.join("; ")}`);
+          }
+        } catch { /* non-fatal */ }
+      }
     } catch { /* retry */ }
     await new Promise(r => setTimeout(r, 3000));
   }
-  return false;
+  return { bound: false };
 }
 
 /* ── Helper: create or replace K8s resource (idempotent) ───────────── */
@@ -279,12 +297,17 @@ const serviceProvisionWorker = new Worker(
 
         // Wait for PVC to bind before proceeding
         const pvcName = k8sResources.pvc.metadata.name;
-        await appendLog(instance, `  → Waiting for PVC '${pvcName}' to bind...`);
-        const pvcBound = await waitForPvcBound(pvcName, instance.namespace, 60_000);
-        if (!pvcBound) {
+        const storageClass = k8sResources.pvc.spec?.storageClassName || "(cluster default)";
+        await appendLog(instance, `  → Waiting for PVC '${pvcName}' to bind (storageClass: ${storageClass})...`);
+        const pvcResult = await waitForPvcBound(pvcName, instance.namespace, 120_000);
+        if (!pvcResult.bound) {
           throw new Error(
-            `PVC '${pvcName}' stuck in Pending after 60s. No StorageClass provisioner found. ` +
-            `Run on server: kubectl get sc && kubectl -n local-path-storage get pods`
+            `PVC '${pvcName}' stuck in Pending after 120s. StorageClass: ${storageClass}. ` +
+            `This usually means no StorageClass provisioner is running on the cluster. ` +
+            `Fix: (1) kubectl get sc — check if a StorageClass exists and is marked (default). ` +
+            `(2) If not, install one: kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml ` +
+            `(3) Set as default: kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' ` +
+            `(4) Verify provisioner pods: kubectl -n local-path-storage get pods`
           );
         }
         await appendLog(instance, "  → PVC bound successfully");
@@ -369,10 +392,24 @@ const serviceProvisionWorker = new Worker(
       }
 
       /* ── Step 6: Wait for readiness ────────────────────────────── */
-      await appendLog(instance, "  → Waiting for pod readiness (timeout: 120s)...");
+      // Per-service readiness timeouts — heavy services like ES need more time
+      const READINESS_TIMEOUTS = {
+        elasticsearch: 180_000,
+        opensearch: 180_000,
+        kafka: 180_000,
+        rabbitmq: 150_000,
+        mysql: 120_000,
+        postgresql: 120_000,
+        mongodb: 120_000,
+        minio: 90_000,
+        meilisearch: 90_000,
+        redis: 60_000,
+      };
+      const readinessTimeout = READINESS_TIMEOUTS[catalog.name] || 120_000;
+      await appendLog(instance, `  → Waiting for pod readiness (timeout: ${readinessTimeout / 1000}s)...`);
 
       try {
-        await waitForReady(kubeResName, 120_000, instance.namespace);
+        await waitForReady(kubeResName, readinessTimeout, instance.namespace);
         await appendLog(instance, "  → Pod is ready! 🚀");
       } catch (readyErr) {
         await appendLog(instance, `  ⚠ Pod readiness check failed: ${readyErr.message.slice(0, 300)}`);
