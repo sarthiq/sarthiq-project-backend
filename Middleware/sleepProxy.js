@@ -387,9 +387,20 @@ function getOrCreateServiceProxy(subdomain, clusterIP, port) {
 
   const proxy = createProxyMiddleware({
     target,
-    changeOrigin: true,
+    // CRITICAL: Keep the original Host header (e.g., minio-31-console.sarthiq.in)
+    // If changeOrigin is true, MinIO sees Host:clusterIP and sets session cookies
+    // for the wrong domain → browser can't send cookies back → 403 on /api/v1/session
+    changeOrigin: false,
     ws: true,
     on: {
+      proxyReq: (proxyReq, req) => {
+        // Forward proper reverse proxy headers so MinIO knows it's behind HTTPS
+        proxyReq.setHeader("X-Forwarded-Proto", "https");
+        proxyReq.setHeader("X-Forwarded-Host", req.headers.host || subdomain);
+        if (req.ip || req.connection?.remoteAddress) {
+          proxyReq.setHeader("X-Real-IP", req.ip || req.connection.remoteAddress);
+        }
+      },
       proxyRes: (proxyRes) => {
         // Strip CSP headers — MinIO console uses blob: URLs for web workers
         // that violate its own CSP. Removing CSP allows them to load.
