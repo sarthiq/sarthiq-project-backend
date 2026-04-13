@@ -47,9 +47,15 @@ const {
 const { detectStack, classifyEnvVars } = require("../Utils/aiStackDetector");
 const { diagnoseError, collectPodLogs } = require("../Utils/aiDebugger");
 
-// ── Security modules ──────────────────────────────────────────────
+// ── Build Optimization modules ───────────────────────────────────────
+const { optimizeBuildContext } = require("../Utils/buildContextOptimizer");
+const { detectMonorepo } = require("../Utils/monorepoDetector");
+
+// ── Security modules ──────────────────────────────────────────────────
 const {
   spawnAsync,
+  spawnAsyncWithProgress,
+  spawnAsyncWithEnv,
   validateRepoUrl,
   validateBranch,
   validateImageTag,
@@ -67,6 +73,9 @@ const REGISTRY = process.env.DOCKER_REGISTRY || (isProd ? "registry.sarthiq.com"
 const { PROJECT_DOMAIN } = require("../Middleware/subdomainParser");
 const DEPLOY_DOMAIN = isProd ? PROJECT_DOMAIN : "localhost";
 const MAX_AI_RETRIES = Math.min(parseInt(process.env.MAX_AI_RETRIES || "3"), 5); // Cap at 5
+
+// ── BuildKit cache directory (for local/minikube mode) ─────────────────
+const CACHE_DIR = process.env.SARTHIQ_CACHE_DIR || path.join(os.tmpdir(), "sarthiq-cache");
 
 /* ------------------------------------------------------------------ */
 /* Helper: append a SANITIZED log line to the DeploymentJob record     */
@@ -94,13 +103,15 @@ function generateSubdomain(title, projectId) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Helper: build Docker image SAFELY (spawn, no shell)                 */
+/* Helper: build Docker image with BuildKit + caching (OPTIMIZED)       */
 /* ------------------------------------------------------------------ */
 async function buildDockerImage({
   imageTag,
   buildContext,
   buildTimeEnvs = {},
   timeout = 600_000,
+  subdomain = "",
+  onProgress = null,
 }) {
   // Validate image tag
   validateImageTag(imageTag);
@@ -116,11 +127,50 @@ async function buildDockerImage({
     args.push("--build-arg", `${key}=${value}`);
   }
 
+  // ── BuildKit cache strategy (dual-mode) ──────────────────────────
+  if (REGISTRY) {
+    // PRODUCTION: Use registry-based caching
+    const cacheRef = `${REGISTRY}/${subdomain || "sarthiq"}:cache`;
+    args.push("--cache-from", `type=registry,ref=${cacheRef}`);
+    args.push("--cache-to", `type=registry,ref=${cacheRef},mode=max`);
+  } else {
+    // LOCAL (minikube): Use local directory-based caching
+    const localCacheDir = path.join(CACHE_DIR, subdomain || "default");
+    // Ensure cache dir exists
+    fs.mkdirSync(localCacheDir, { recursive: true });
+    args.push("--cache-from", `type=local,src=${localCacheDir}`);
+    args.push("--cache-to", `type=local,dest=${localCacheDir},mode=max`);
+  }
+
   // Tag and context
   args.push("-t", imageTag, buildContext);
 
-  // Execute via spawn (NEVER exec/shell)
-  return await spawnAsync("docker", args, { timeout });
+  // Enable BuildKit via environment variable
+  const buildEnv = { ...process.env, DOCKER_BUILDKIT: "1" };
+
+  // Execute via spawn with progress streaming + BuildKit enabled
+  if (onProgress) {
+    return await spawnAsyncWithProgress("docker", args, {
+      timeout,
+      env: buildEnv,
+      onLine: onProgress,
+    });
+  }
+
+  return await spawnAsync("docker", args, { timeout, env: buildEnv });
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper: get Docker image size in MB                                  */
+/* ------------------------------------------------------------------ */
+async function getImageSizeMB(imageTag) {
+  try {
+    const { stdout } = await spawnAsync("docker", ["image", "inspect", imageTag, "--format", "{{.Size}}"], { timeout: 10_000 });
+    const bytes = parseInt(stdout.trim());
+    return isNaN(bytes) ? null : parseFloat((bytes / (1024 * 1024)).toFixed(2));
+  } catch {
+    return null;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -181,7 +231,7 @@ const deployWorker = new Worker(
       await jobRecord.save();
 
       /* ── STEP 1: Pre-flight cluster check ──────────────────────────── */
-      await appendLog(jobRecord, "Step 1/10: Pre-flight cluster health check...");
+      await appendLog(jobRecord, "Step 1/12: Pre-flight cluster health check...");
 
       const clusterCheck = await preflightClusterCheck();
 
@@ -213,7 +263,7 @@ const deployWorker = new Worker(
       await appendLog(jobRecord, `  → Subdomain: ${project.subdomain}.${DEPLOY_DOMAIN}`);
 
       /* ── STEP 3: Clone repository (SECURE — via spawn) ────────────── */
-      await appendLog(jobRecord, "Step 2/10: Cloning repository...");
+      await appendLog(jobRecord, "Step 2/12: Cloning repository...");
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `sarthiq-${projectId}-`));
 
       // Determine if this is a private GitHub repo that needs authenticated clone
@@ -268,8 +318,54 @@ const deployWorker = new Worker(
         throw new Error("Path traversal detected: projectDirectory escapes temp directory.");
       }
 
-      /* ── STEP 4: AI Stack Detection ───────────────────────────────── */
-      await appendLog(jobRecord, "Step 3/10: 🤖 Analyzing repository with AI stack detector...");
+      /* ── STEP 3b: Build Context Optimization ────────────────────── */
+      await appendLog(jobRecord, "Step 3/12: ⚡ Optimizing build context...");
+
+      // Auto-detect language for .dockerignore generation
+      const quickLang = fs.existsSync(path.join(buildContext, "package.json")) ? "node"
+        : fs.existsSync(path.join(buildContext, "requirements.txt")) ? "python"
+        : fs.existsSync(path.join(buildContext, "go.mod")) ? "go"
+        : fs.existsSync(path.join(buildContext, "pom.xml")) ? "java"
+        : fs.existsSync(path.join(buildContext, "Gemfile")) ? "ruby"
+        : "node"; // safe default
+
+      const contextOptimization = await optimizeBuildContext(buildContext, quickLang, {
+        useAI: true,
+        cleanup: true,
+      });
+
+      for (const opt of contextOptimization.optimizations) {
+        await appendLog(jobRecord, `  → ${opt}`);
+      }
+
+      // Save optimization metadata
+      jobRecord.dockerignoreGenerated = contextOptimization.dockerignoreGenerated;
+      jobRecord.optimizationsApplied = contextOptimization.optimizations;
+      jobRecord.dependencyHash = contextOptimization.dependencyHash;
+      await jobRecord.save();
+
+      /* ── STEP 3c: Monorepo Detection ──────────────────────────────── */
+      await appendLog(jobRecord, "Step 4/12: 🔍 Detecting monorepo structure...");
+
+      const monorepoResult = await detectMonorepo(buildContext);
+      if (monorepoResult.isMonorepo) {
+        await appendLog(jobRecord, `  → Monorepo detected (${monorepoResult.type}): ${monorepoResult.services.length} services found`);
+        for (const svc of monorepoResult.services) {
+          await appendLog(jobRecord, `    • ${svc.name}: ${svc.language}/${svc.framework} on port ${svc.port}`);
+        }
+        jobRecord.servicesDetected = monorepoResult.services;
+        await jobRecord.save();
+
+        // NOTE: For monorepo deployments, the user selects which service(s)
+        // to deploy via the projectDirectory field. The monorepo info is
+        // stored for the frontend to display service selection UI.
+        // Individual service deployment uses the existing single-app pipeline.
+      } else {
+        await appendLog(jobRecord, "  → Single-app project (not a monorepo)");
+      }
+
+      /* ── STEP 5: AI Stack Detection ───────────────────────────────── */
+      await appendLog(jobRecord, "Step 5/12: 🤖 Analyzing repository with AI stack detector...");
 
       // User overrides (user-provided values take priority over AI)
       const userOverrides = {};
@@ -312,7 +408,7 @@ const deployWorker = new Worker(
       let currentDockerfile = detection.dockerfile;
 
       if (!fs.existsSync(dockerfilePath)) {
-        await appendLog(jobRecord, "Step 4/10: Validating AI-generated Dockerfile...");
+        await appendLog(jobRecord, "Step 6/12: Validating AI-generated Dockerfile...");
 
         // VALIDATE Dockerfile content before writing
         const validation = validateDockerfile(currentDockerfile);
@@ -343,7 +439,7 @@ const deployWorker = new Worker(
           );
         }
 
-        await appendLog(jobRecord, "Step 4/10: Using existing Dockerfile from repo (validated).");
+        await appendLog(jobRecord, "Step 6/12: Using existing Dockerfile from repo (validated).");
       }
 
       // Save the Dockerfile used to deployment job
@@ -351,7 +447,7 @@ const deployWorker = new Worker(
       await jobRecord.save();
 
       /* ── STEP 5b: Root requirement detection ──────────────────────── */
-      await appendLog(jobRecord, "Step 5/10: 🔍 Checking root requirements...");
+      await appendLog(jobRecord, "Step 7/12: 🔍 Checking root requirements...");
 
       const rootDetection = detectRootRequirements({
         dockerfileContent: currentDockerfile,
@@ -421,15 +517,20 @@ const deployWorker = new Worker(
         await appendLog(jobRecord, `  → ${executionDecision.warning}`);
       }
 
-      /* ── STEP 6: Build Docker image (with AI retry loop) ──────────── */
-      await appendLog(jobRecord, "Step 6/10: Building Docker image...");
+      /* ── STEP 7: Build Docker image (with BuildKit + AI retry loop) ── */
+      await appendLog(jobRecord, "Step 8/12: 🔨 Building Docker image (BuildKit enabled)...");
+
+      // Smart image tagging: dependency-hash + timestamp for cache reuse
+      const depHash = contextOptimization.dependencyHash || Date.now();
+      const timestamp = Date.now();
       const imageTag = REGISTRY
-        ? `${REGISTRY}/${project.subdomain}:${Date.now()}`
-        : `${project.subdomain}:${Date.now()}`;
+        ? `${REGISTRY}/${project.subdomain}:${depHash}-${timestamp}`
+        : `${project.subdomain}:${depHash}-${timestamp}`;
 
       // Validate image tag
       validateImageTag(imageTag);
 
+      const buildStartTime = Date.now();
       let buildSuccess = false;
       let retryCount = 0;
       const allDiagnoses = [];
@@ -447,10 +548,25 @@ const deployWorker = new Worker(
             imageTag,
             buildContext,
             buildTimeEnvs: detection.buildTimeEnvs,
+            subdomain: project.subdomain,
+            onProgress: (line) => {
+              // Log significant build progress lines (skip empty/noise)
+              if (line && line.trim() && !line.includes("#")) {
+                console.log(`[build:${project.subdomain}] ${line.trim().slice(0, 200)}`);
+              }
+            },
           });
 
           buildSuccess = true;
+          const buildDurationMs = Date.now() - buildStartTime;
+          const imageSizeMB = await getImageSizeMB(imageTag);
+
+          jobRecord.buildDurationMs = buildDurationMs;
+          jobRecord.imageSizeMB = imageSizeMB;
+          await jobRecord.save();
+
           await appendLog(jobRecord, `  → Image built: ${imageTag}`);
+          await appendLog(jobRecord, `  → Build time: ${(buildDurationMs / 1000).toFixed(1)}s | Image size: ${imageSizeMB ? imageSizeMB + " MB" : "unknown"}`);
         } catch (buildErr) {
           const errorLogs = (buildErr.stderr || "") + "\n" + (buildErr.stdout || "") + "\n" + buildErr.message;
 
@@ -525,13 +641,20 @@ const deployWorker = new Worker(
       jobRecord.retryCount = retryCount;
       await jobRecord.save();
 
-      /* ── STEP 7: Push image ───────────────────────────────────────── */
+      /* ── STEP 9: Push image (with BuildKit --- cache already exported) ─ */
       if (REGISTRY) {
-        await appendLog(jobRecord, "Step 7/10: Pushing image to registry...");
-        await spawnAsync("docker", ["push", imageTag], { timeout: 600_000 });
-        await appendLog(jobRecord, "  → Push complete.");
+        await appendLog(jobRecord, "Step 9/12: 🚀 Pushing image to registry...");
+        // BuildKit cache is already exported during build via --cache-to.
+        // We only need to push the main image tag.
+        const pushStartTime = Date.now();
+        await spawnAsync("docker", ["push", imageTag], {
+          timeout: 600_000,
+          env: { ...process.env, DOCKER_BUILDKIT: "1" },
+        });
+        const pushDuration = ((Date.now() - pushStartTime) / 1000).toFixed(1);
+        await appendLog(jobRecord, `  → Push complete (${pushDuration}s).`);
       } else {
-        await appendLog(jobRecord, "Step 7/10: Local testing mode. Skipping registry push.");
+        await appendLog(jobRecord, "Step 9/12: Local testing mode. Skipping registry push.");
       }
 
       /* Clean up temp dir */
@@ -540,8 +663,8 @@ const deployWorker = new Worker(
         tmpDir = null;
       }
 
-      /* ── STEP 8: Create K8s resources (with security context) ────── */
-      await appendLog(jobRecord, "Step 8/10: Creating Kubernetes resources...");
+      /* ── STEP 10: Create K8s resources (with security context) ───── */
+      await appendLog(jobRecord, "Step 10/12: Creating Kubernetes resources...");
 
       const cpuLimit = dockerInfo.cpu || securityConfig.maxCpu || "500m";
       let memLimit = dockerInfo.memory || securityConfig.maxMemory || "512Mi";
@@ -609,8 +732,8 @@ const deployWorker = new Worker(
         console.warn(`[deployWorker] Ingress creation failed for ${deployName}: ${ingressErr.message?.slice(0, 200)}`);
       }
 
-      /* ── STEP 9: Wait for pod ready (with diagnostics) ────────────── */
-      await appendLog(jobRecord, "Step 9/10: Waiting for pod to become ready...");
+      /* ── STEP 11: Wait for pod ready (with diagnostics) ───────────── */
+      await appendLog(jobRecord, "Step 11/12: Waiting for pod to become ready...");
 
       try {
         await waitForReady(deployName, 180_000);
@@ -681,7 +804,7 @@ const deployWorker = new Worker(
         throw readyErr;
       }
 
-      /* ── STEP 10: Update dockerInfo ─────────────────────────────── */
+      /* ── STEP 12: Update dockerInfo ─────────────────────────────── */
       dockerInfo.image = imageTag;
       dockerInfo.status = "running";
       dockerInfo.nodeId = node.nodeName;

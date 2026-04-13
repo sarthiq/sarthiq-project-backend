@@ -472,12 +472,13 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
   // Use forgiving install commands — 'npm ci' and '--frozen-lockfile' fail
   // when lock files are out of sync, which is common on user-submitted repos.
   // Fallback: try strict first, fall back to permissive install.
+  // Use BuildKit cache mounts to persist npm/yarn/pnpm cache across builds.
   const installCmd =
     packageManager === "yarn"
-      ? "yarn install --frozen-lockfile || yarn install"
+      ? "RUN --mount=type=cache,target=/root/.yarn YARN_CACHE_FOLDER=/root/.yarn yarn install --frozen-lockfile || yarn install"
       : packageManager === "pnpm"
-        ? "pnpm install --frozen-lockfile || pnpm install"
-        : "npm ci --legacy-peer-deps || npm install --legacy-peer-deps";
+        ? "RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile || pnpm install"
+        : "RUN --mount=type=cache,target=/root/.npm npm ci --legacy-peer-deps || npm install --legacy-peer-deps";
 
   // Build-time ARG + ENV lines
   const buildArgLines = Object.keys(buildTimeEnvs)
@@ -487,10 +488,11 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
   /* ── Node.js Static (React, Vite, Angular) ───────────────────── */
   if (language === "node" && isStaticSite) {
     return `
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json yarn.lock* pnpm-lock.yaml* ./
-RUN ${installCmd}
+${installCmd}
 COPY . .
 ${buildArgLines}
 RUN ${buildCommand || "npm run build"}
@@ -523,31 +525,28 @@ CMD ["nginx", "-g", "daemon off;"]
   /* ── Next.js (SSR — optimized production image) ──────────────── */
   if (language === "node" && framework === "nextjs") {
     return `
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json yarn.lock* pnpm-lock.yaml* ./
-RUN ${installCmd}
+${installCmd}
 COPY . .
 ${buildArgLines}
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN ${buildCommand || "npm run build"}
-# Remove dev dependencies to drastically shrink the image
-RUN npm prune --production 2>/dev/null; rm -rf .next/cache
+RUN ${buildCommand || "npm run build"} && \
+    npm prune --production 2>/dev/null; rm -rf .next/cache
 
 FROM node:20-alpine
 WORKDIR /app
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV HOST=0.0.0.0
-ENV HOSTNAME=0.0.0.0
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOST=0.0.0.0 HOSTNAME=0.0.0.0
 # Copy only production essentials (NOT the entire /app)
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/next.config* ./
-RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
-RUN chown -R appuser:appgroup /app
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
 USER appuser
 EXPOSE ${port || 3000}
 CMD ["npm", "start"]
@@ -557,22 +556,21 @@ CMD ["npm", "start"]
   /* ── Nuxt (SSR — optimized production image) ─────────────────── */
   if (language === "node" && framework === "nuxt") {
     return `
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json yarn.lock* pnpm-lock.yaml* ./
-RUN ${installCmd}
+${installCmd}
 COPY . .
 ${buildArgLines}
 RUN ${buildCommand || "npm run build"}
 
 FROM node:20-alpine
 WORKDIR /app
-ENV NODE_ENV=production
-ENV HOST=0.0.0.0
-ENV HOSTNAME=0.0.0.0
+ENV NODE_ENV=production HOST=0.0.0.0 HOSTNAME=0.0.0.0
 COPY --from=builder /app/.output ./.output
-RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
-RUN chown -R appuser:appgroup /app
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
 USER appuser
 EXPOSE ${port || 3000}
 CMD ["node", ".output/server/index.mjs"]
@@ -591,10 +589,15 @@ CMD ["node", ".output/server/index.mjs"]
       .join(", ");
 
     return `
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1
+FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json yarn.lock* pnpm-lock.yaml* ./
-RUN ${installCmd}
+${installCmd}
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ${buildArgLines}
 ${buildStep}
@@ -603,23 +606,24 @@ RUN npm prune --production 2>/dev/null; true
 
 FROM node:20-alpine
 WORKDIR /app
-COPY --from=builder /app ./
-ENV NODE_ENV=production
-ENV HOST=0.0.0.0
-ENV HOSTNAME=0.0.0.0
-RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
-RUN chown -R appuser:appgroup /app
+ENV NODE_ENV=production HOST=0.0.0.0 HOSTNAME=0.0.0.0
+# Copy only production essentials
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+${buildCommand ? "COPY --from=builder /app/dist ./dist" : "COPY --from=builder /app ./"}
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
 USER appuser
 EXPOSE ${port || 3000}
 CMD [${cmdParts}]
 `.trim();
   }
 
-  /* ── Python (FastAPI, Flask, Django) ──────────────────────────── */
+  /* ── Python (FastAPI, Flask, Django) — multi-stage build ──────── */
   if (language === "python") {
     const installDeps = detection.packageManager === "pipenv"
-      ? "RUN pip install pipenv && pipenv install --deploy --system"
-      : "COPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt";
+      ? "RUN pip install --no-cache-dir pipenv && pipenv install --deploy --system"
+      : "COPY requirements.txt ./\nRUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt";
 
     const buildStep = buildCommand ? `RUN ${buildCommand}` : "";
 
@@ -640,12 +644,22 @@ CMD [${cmdParts}]
       .join(", ");
 
     return `
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim AS builder
 WORKDIR /app
 ${installDeps}
 ${extraInstall}
 COPY . .
 ${buildStep}
+
+FROM python:3.12-slim
+WORKDIR /app
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /app .
+RUN addgroup --gid 1001 appgroup && adduser --uid 1001 --gid 1001 --disabled-password appuser
+USER appuser
 EXPOSE ${port || 8000}
 CMD [${cmdParts}]
 `.trim();
@@ -654,18 +668,21 @@ CMD [${cmdParts}]
   /* ── Go ──────────────────────────────────────────────────────── */
   if (language === "go") {
     return `
+# syntax=docker/dockerfile:1
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o app .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app .
 
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /app/app .
+FROM scratch
+COPY --from=builder /app/app /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 EXPOSE ${port || 8080}
-CMD ["./app"]
+USER 1000
+ENTRYPOINT ["/app"]
 `.trim();
   }
 

@@ -532,12 +532,132 @@ function escapeHtml(str) {
 }
 
 /* ================================================================== */
+/* 13. SPAWN WITH PROGRESS (for BuildKit streaming output)             */
+/* ================================================================== */
+
+/**
+ * Execute a command with real-time output streaming.
+ * Like spawnAsync but calls `onLine(line)` for each stdout/stderr line.
+ * Used for Docker BuildKit progress output.
+ *
+ * @param {string}   cmd      – binary name
+ * @param {string[]} args     – argument array
+ * @param {object}   options  – { timeout, cwd, env, onLine }
+ * @param {function} options.onLine – callback for each output line (optional)
+ * @returns {Promise<{ stdout: string, stderr: string }>}
+ */
+function spawnAsyncWithProgress(cmd, args = [], options = {}) {
+  return new Promise((resolve, reject) => {
+    const timeout = options.timeout || 600_000;
+    const maxBuffer = options.maxBuffer || 10 * 1024 * 1024;
+    const onLine = options.onLine || (() => {});
+
+    const child = spawn(cmd, args, {
+      cwd: options.cwd,
+      env: options.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      timeout,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    let lineBuf = "";
+
+    const processLine = (line) => {
+      try { onLine(line); } catch { /* don't let callback errors break build */ }
+    };
+
+    child.stdout.on("data", (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      // Split into lines and call onLine
+      lineBuf += chunk;
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop(); // keep incomplete last line
+      lines.forEach(processLine);
+
+      if (stdout.length > maxBuffer) {
+        child.kill("SIGKILL");
+        killed = true;
+      }
+    });
+
+    child.stderr.on("data", (d) => {
+      const chunk = d.toString();
+      stderr += chunk;
+      // For BuildKit, progress comes on stderr
+      lineBuf += chunk;
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop();
+      lines.forEach(processLine);
+
+      if (stderr.length > maxBuffer) {
+        child.kill("SIGKILL");
+        killed = true;
+      }
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      killed = true;
+      reject(new Error(`Command timed out after ${timeout}ms: ${cmd}`));
+    }, timeout);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      // Flush remaining buffer
+      if (lineBuf) processLine(lineBuf);
+
+      if (killed) {
+        return reject(
+          new Error(`Command killed (buffer exceeded or timeout): ${cmd}`)
+        );
+      }
+      if (code !== 0) {
+        const err = new Error(
+          `Command "${cmd}" exited with code ${code}: ${stderr.slice(0, 500)}`
+        );
+        err.stdout = stdout;
+        err.stderr = stderr;
+        err.code = code;
+        return reject(err);
+      }
+      resolve({ stdout, stderr });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Execute a command with additional environment variables merged in safely.
+ * Used for injecting DOCKER_BUILDKIT=1 without mutating process.env.
+ *
+ * @param {string}   cmd      – binary name
+ * @param {string[]} args     – argument array
+ * @param {object}   extraEnv – additional env vars to inject
+ * @param {object}   options  – same as spawnAsync
+ * @returns {Promise<{ stdout: string, stderr: string }>}
+ */
+function spawnAsyncWithEnv(cmd, args = [], extraEnv = {}, options = {}) {
+  const mergedEnv = { ...process.env, ...extraEnv };
+  return spawnAsync(cmd, args, { ...options, env: mergedEnv });
+}
+
+/* ================================================================== */
 /* EXPORTS                                                             */
 /* ================================================================== */
 
 module.exports = {
   // Shell-safe execution
   spawnAsync,
+  spawnAsyncWithProgress,
+  spawnAsyncWithEnv,
 
   // Input validators
   validateRepoUrl,

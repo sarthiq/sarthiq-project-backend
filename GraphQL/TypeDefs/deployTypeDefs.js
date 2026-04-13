@@ -16,6 +16,15 @@ module.exports = `#graphql
     ProjectId: Int
     UserId: Int
     createdAt: String
+    # Build optimization metrics
+    buildDurationMs: Int
+    imageSizeMB: Float
+    cacheHit: Boolean
+    dependencyHash: String
+    dockerignoreGenerated: Boolean
+    servicesDetected: String    # JSON array of detected monorepo services
+    optimizationsApplied: String # JSON array of applied optimizations
+    buildContextSizeMB: Float
   }
 
   # ── Admin Stats ──────────────────────────────────────────────────

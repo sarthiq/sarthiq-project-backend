@@ -76,6 +76,39 @@ const DeploymentJob = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: false,
     },
+    // ── Build Optimization Metrics ────────────────────────────────
+    buildDurationMs: {
+      type: DataTypes.INTEGER,       // total build time in milliseconds
+      allowNull: true,
+    },
+    imageSizeMB: {
+      type: DataTypes.FLOAT,         // final Docker image size in MB
+      allowNull: true,
+    },
+    cacheHit: {
+      type: DataTypes.BOOLEAN,       // whether Docker cache was reused
+      allowNull: true,
+    },
+    dependencyHash: {
+      type: DataTypes.STRING,        // lockfile hash for cache fingerprinting
+      allowNull: true,
+    },
+    dockerignoreGenerated: {
+      type: DataTypes.BOOLEAN,       // whether .dockerignore was auto-generated
+      allowNull: true,
+    },
+    servicesDetected: {
+      type: DataTypes.JSON,          // monorepo service map (ServiceInfo[])
+      allowNull: true,
+    },
+    optimizationsApplied: {
+      type: DataTypes.JSON,          // list of optimization descriptions applied
+      allowNull: true,
+    },
+    buildContextSizeMB: {
+      type: DataTypes.FLOAT,         // build context size before/after optimization
+      allowNull: true,
+    },
   },
   {
     tableName: "deploymentJobs",

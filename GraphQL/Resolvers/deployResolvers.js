@@ -59,6 +59,18 @@ module.exports = {
       }
       return parent.aiDiagnosis || null;
     },
+    servicesDetected: (parent) => {
+      if (typeof parent.servicesDetected === "object" && parent.servicesDetected !== null) {
+        return JSON.stringify(parent.servicesDetected);
+      }
+      return parent.servicesDetected || null;
+    },
+    optimizationsApplied: (parent) => {
+      if (typeof parent.optimizationsApplied === "object" && parent.optimizationsApplied !== null) {
+        return JSON.stringify(parent.optimizationsApplied);
+      }
+      return parent.optimizationsApplied || null;
+    },
   },
 
   Query: {
