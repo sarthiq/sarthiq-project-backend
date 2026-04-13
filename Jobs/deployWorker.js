@@ -961,6 +961,8 @@ const deployWorker = new Worker(
     connection,
     concurrency: parseInt(process.env.DEPLOY_CONCURRENCY || "3"),
     limiter: { max: 5, duration: 60_000 }, // max 5 deploys/minute globally
+    stalledInterval: 60_000, // check for stalled jobs every 60 seconds
+    lockDuration: 300_000,   // job lock expires after 5 minutes (if worker dies)
   }
 );
 

@@ -209,15 +209,15 @@ module.exports = {
       });
 
       if (inProgress) {
-        // Auto-clean stale jobs stuck for more than 10 minutes
-        const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
+        // Auto-clean stale jobs stuck for more than 5 minutes
+        const staleThreshold = new Date(Date.now() - 5 * 60 * 1000);
         if (inProgress.createdAt < staleThreshold) {
           console.log(
             `[deploy] Auto-cleaning stale job #${inProgress.id} (status: ${inProgress.status}, created: ${inProgress.createdAt})`
           );
           await inProgress.update({
             status: "failed",
-            errorMessage: "Auto-cleaned: job was stuck for over 10 minutes",
+            errorMessage: "Auto-cleaned: job was stuck for over 5 minutes",
             completedAt: new Date(),
           });
           // Also reset dockerInfo if it's stuck
@@ -230,6 +230,16 @@ module.exports = {
               },
             }
           );
+          // Try to remove the stale BullMQ job from Redis too
+          if (inProgress.bullmqJobId) {
+            try {
+              const oldJob = await deployQueue.getJob(inProgress.bullmqJobId);
+              if (oldJob) {
+                await oldJob.remove().catch(() => {});
+                // Also try to remove by the custom jobId pattern
+              }
+            } catch { /* ignore — job may already be gone */ }
+          }
         } else {
           throw new Error(
             "A deployment is already in progress for this project"
@@ -270,6 +280,51 @@ module.exports = {
       await enforceDeploymentRetention(parseInt(projectId), 5);
 
       return dbJob;
+    },
+
+    /* ── Cancel a stuck deployment ────────────────────────────── */
+    cancelDeploy: async (_, { projectId }, context) => {
+      if (!context.user && !context.admin) throw new Error("Unauthorized");
+
+      const project = await Project.findByPk(projectId);
+      if (!project) throw new Error("Project not found");
+      if (context.user && project.UserId !== context.user.id) {
+        throw new Error("Unauthorized: Not your project");
+      }
+
+      // Find stuck jobs
+      const stuckJobs = await DeploymentJob.findAll({
+        where: {
+          ProjectId: projectId,
+          status: { [Op.in]: ["queued", "building"] },
+        },
+      });
+
+      for (const job of stuckJobs) {
+        // Mark as cancelled in DB
+        await job.update({
+          status: "failed",
+          errorMessage: "Cancelled by user",
+          completedAt: new Date(),
+        });
+
+        // Remove from BullMQ
+        if (job.bullmqJobId) {
+          try {
+            const bullJob = await deployQueue.getJob(job.bullmqJobId);
+            if (bullJob) await bullJob.remove().catch(() => {});
+          } catch { /* ignore */ }
+        }
+      }
+
+      // Reset DockerInfo status
+      await DockerInfo.update(
+        { status: "idle" },
+        { where: { ProjectId: projectId, status: { [Op.in]: ["queued", "building"] } } }
+      );
+
+      console.log(`[deploy] Cancelled ${stuckJobs.length} stuck job(s) for project ${projectId}`);
+      return true;
     },
 
     /* ── Stop a running project (scale to 0) ───────────────────── */

@@ -73,6 +73,7 @@ module.exports = `#graphql
   # ── Mutations ────────────────────────────────────────────────────
   type Mutation {
     triggerDeploy(projectId: ID!): DeploymentJob
+    cancelDeploy(projectId: ID!): Boolean
     wakeProject(projectId: ID!): DeploymentJob
     stopProject(projectId: ID!): Boolean
     deleteProjectDeploy(projectId: ID!): Boolean

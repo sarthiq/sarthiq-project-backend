@@ -166,6 +166,55 @@ const RUBY_IGNORES = [
 ];
 
 /**
+ * Safety negation patterns — placed at the END of .dockerignore.
+ * Docker processes .dockerignore top-to-bottom; later '!' patterns override earlier excludes.
+ * This guarantees source code files are NEVER accidentally excluded.
+ */
+const SAFETY_NEGATIONS = [
+  "# === SAFETY: Always include source code (overrides any accidental exclusions) ===",
+  "!src",
+  "!src/**",
+  "!public",
+  "!public/**",
+  "!app",
+  "!app/**",
+  "!pages",
+  "!pages/**",
+  "!components",
+  "!components/**",
+  "!styles",
+  "!styles/**",
+  "!lib",
+  "!lib/**",
+  "!server",
+  "!server/**",
+  "!client",
+  "!client/**",
+  "!package.json",
+  "!package-lock.json",
+  "!yarn.lock",
+  "!pnpm-lock.yaml",
+  "!tsconfig.json",
+  "!tsconfig*.json",
+  "!next.config*",
+  "!vite.config*",
+  "!postcss.config*",
+  "!tailwind.config*",
+  "!*.config.js",
+  "!*.config.ts",
+  "!*.config.mjs",
+  "!requirements.txt",
+  "!Pipfile",
+  "!Pipfile.lock",
+  "!pyproject.toml",
+  "!go.mod",
+  "!go.sum",
+  "!Gemfile",
+  "!Gemfile.lock",
+  "!Dockerfile",
+];
+
+/**
  * Get language-specific ignore patterns.
  * @param {string} language - detected language (node, python, go, java, ruby)
  * @returns {string[]}
@@ -265,7 +314,26 @@ Respond with ONLY the patterns (no markdown, no explanation):`;
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#") && l.length < 100)
       // Block anything that looks like it would exclude essential files
-      .filter((l) => !["package.json", "requirements.txt", "go.mod", "Gemfile", "pom.xml", "build.gradle", "Cargo.toml", "*.js", "*.ts", "*.py", "*.go", "*.java", "*.rb", "src", "app", "lib"].includes(l));
+      .filter((l) => {
+        // Block anything that would exclude essential source code or build files
+        const BLOCKED_EXACT = [
+          "package.json", "requirements.txt", "go.mod", "Gemfile", "pom.xml",
+          "build.gradle", "Cargo.toml", "*.js", "*.ts", "*.py", "*.go", "*.java",
+          "*.rb", "*.css", "*.scss", "*.sass", "*.less", "*.html", "*.htm",
+          "*.json", "*.tsx", "*.jsx", "*.vue", "*.svelte", "*.mjs", "*.cjs",
+          "*.yaml", "*.yml", "*.toml", "*.cfg", "*.ini", "*.xml",
+          "src", "src/", "app", "app/", "lib", "lib/", "public", "public/",
+          "pages", "pages/", "components", "components/", "styles", "styles/",
+          "assets", "assets/", "static", "static/", "server", "server/",
+          "client", "client/", "frontend", "frontend/", "backend", "backend/",
+        ];
+        if (BLOCKED_EXACT.includes(l)) return false;
+        // Block wildcard patterns targeting source extensions
+        if (/^\*\.\w+$/.test(l) && /\.(js|ts|tsx|jsx|css|scss|html|json|vue|svelte|py|go|java|rb|rs|php|c|cpp|h)$/.test(l)) return false;
+        // Block patterns that exclude entire src-like directories
+        if (/^(src|app|lib|public|pages|components|styles|assets|static|server|client)\b/.test(l)) return false;
+        return true;
+      });
 
     return patterns.length > 0 ? ["# === AI-detected exclusions ===", ...patterns] : [];
   } catch (err) {
@@ -326,6 +394,8 @@ async function generateDockerignore(buildContext, language, useAI = true) {
       "# --- SarthiQ optimized additions ---",
       ...optimizedLines.filter((l) => !existingLines.includes(l) || l.startsWith("#")),
       ...(aiExclusions.length > 0 ? ["", ...aiExclusions] : []),
+      "",
+      ...SAFETY_NEGATIONS,
     ].join("\n");
 
     fs.writeFileSync(dockerignorePath, mergedContent);
@@ -335,6 +405,8 @@ async function generateDockerignore(buildContext, language, useAI = true) {
     const content = [
       ...optimizedLines,
       ...(aiExclusions.length > 0 ? ["", ...aiExclusions] : []),
+      "",
+      ...SAFETY_NEGATIONS,
     ].join("\n");
 
     fs.writeFileSync(dockerignorePath, content);
