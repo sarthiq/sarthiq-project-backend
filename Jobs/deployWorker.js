@@ -373,10 +373,45 @@ const deployWorker = new Worker(
         jobRecord.servicesDetected = monorepoResult.services;
         await jobRecord.save();
 
-        // NOTE: For monorepo deployments, the user selects which service(s)
-        // to deploy via the projectDirectory field. The monorepo info is
-        // stored for the frontend to display service selection UI.
-        // Individual service deployment uses the existing single-app pipeline.
+        // ── BLOCK: If user has NOT selected a specific service yet ──
+        // projectDirectory is still "/" or "." → user needs to pick which service to deploy
+        const projDir = project.projectDirectory || "/";
+        const isRootDir = projDir === "/" || projDir === "." || projDir === "./";
+
+        if (monorepoResult.services.length > 1 && isRootDir) {
+          await appendLog(jobRecord, "");
+          await appendLog(jobRecord, "  ⚠️  MONOREPO DETECTED — SERVICE SELECTION REQUIRED");
+          await appendLog(jobRecord, "  Multiple services found in this repository.");
+          await appendLog(jobRecord, "  Please select which service you want to deploy from the project overview page.");
+          await appendLog(jobRecord, "");
+
+          // Mark the job as done (DB ENUM only allows: queued/building/running/sleeping/failed/done)
+          // Use errorMessage as the flag for the frontend to detect
+          jobRecord.status = "done";
+          jobRecord.errorMessage = "MONOREPO_SELECTION_REQUIRED";
+          jobRecord.completedAt = new Date();
+          await jobRecord.save();
+
+          // Reset container status to idle (not failed — this is a user flow, not an error)
+          const DockerInfoModel = require("../Models/Projects/dockerInfo");
+          await DockerInfoModel.update(
+            { status: "idle" },
+            { where: { ProjectId: project.id } }
+          );
+
+          // Clean up temp dir
+          if (tmpDir) {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+            tmpDir = null;
+          }
+
+          // Release node capacity
+          if (node) {
+            releaseNode(node.id).catch(() => {});
+          }
+
+          return; // ← STOP the deployment pipeline here
+        }
       } else {
         await appendLog(jobRecord, "  → Single-app project (not a monorepo)");
       }
