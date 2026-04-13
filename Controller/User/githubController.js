@@ -694,6 +694,10 @@ async function handlePushEvent(payload) {
   const branch = payload.ref?.replace("refs/heads/", "");
   const installationId = payload.installation?.id;
 
+  // Extract commit info from webhook payload
+  const commitSha = payload.head_commit?.id || payload.after || null;
+  const commitMessage = payload.head_commit?.message || null;
+
   if (!repoFullName || !branch) {
     console.log("[github webhook] Push event missing repo/branch info");
     return;
@@ -721,6 +725,14 @@ async function handlePushEvent(payload) {
 
   for (const project of projects) {
     try {
+      // Check if auto-deploy is enabled for this project
+      if (project.autoDeployOnPush === false) {
+        console.log(
+          `[github webhook] Skipping project ${project.id} — autoDeployOnPush is disabled`
+        );
+        continue;
+      }
+
       // Skip if already deploying
       const inProgress = await DeploymentJob.findOne({
         where: {
@@ -736,12 +748,14 @@ async function handlePushEvent(payload) {
         continue;
       }
 
-      // Create deployment job
+      // Create deployment job with commit info
       const dbJob = await DeploymentJob.create({
         ProjectId: project.id,
         UserId: project.UserId,
         status: "queued",
         logs: `[WEBHOOK] Auto-deploy triggered by push to ${repoFullName}@${branch}\n`,
+        commitSha: commitSha ? commitSha.slice(0, 40) : null,
+        commitMessage: commitMessage ? commitMessage.slice(0, 500) : null,
       });
 
       // Update docker status

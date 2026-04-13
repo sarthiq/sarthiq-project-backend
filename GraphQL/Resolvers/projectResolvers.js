@@ -171,6 +171,7 @@ module.exports = {
           updateData.buildCommand = input.buildCommand;
         }
         if (input.buildDirectory !== undefined) updateData.buildDirectory = input.buildDirectory;
+        if (input.autoDeployOnPush !== undefined) updateData.autoDeployOnPush = input.autoDeployOnPush;
         if (input.envVariables !== undefined) {
           let parsedVars = {};
           try {

@@ -19,6 +19,7 @@ module.exports = `#graphql
     detectedStartCommand: String
     detectedPort: Int
     isStaticSite: Boolean
+    autoDeployOnPush: Boolean
     UserId: Int!
     DockerInfo: DockerInfo
   }
@@ -70,6 +71,7 @@ module.exports = `#graphql
     buildCommand: String
     buildDirectory: String
     envVariables: String
+    autoDeployOnPush: Boolean
   }
 
   type Query {

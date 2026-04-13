@@ -434,6 +434,10 @@ function initContainerWebSocket(server) {
   const wss = new WebSocketServer({
     server,
     path: "/api/container/terminal",
+    // Disable per-message compression — intermediate proxies (Nginx, K8s ingress)
+    // can corrupt compressed WebSocket frames, causing "Invalid frame header" errors.
+    perMessageDeflate: false,
+    maxPayload: 1024 * 64, // 64KB max payload per frame
   });
 
   console.log("[containerService] ✓ WebSocket terminal server initialized on /api/container/terminal");

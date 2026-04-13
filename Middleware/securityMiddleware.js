@@ -114,6 +114,38 @@ const deployRateLimiter = rateLimit({
   },
 });
 
+/**
+ * Project proxy rate limiter — applied ONLY to user-deployed project
+ * subdomains (e.g., simple-website-31.sarthiq.in).
+ *
+ * This is SEPARATE from the platform API rate limiter so that traffic
+ * to deployed projects does NOT block access to project.sarthiq.com.
+ *
+ * Default is 300 req/min per IP (free tier). Override per tier via:
+ *   - PROXY_RATE_LIMIT_WINDOW_MS  (default: 60000)
+ *   - PROXY_RATE_LIMIT_MAX        (default: 300)
+ */
+const projectProxyRateLimiter = rateLimit({
+  windowMs: parseInt(process.env.PROXY_RATE_LIMIT_WINDOW_MS || "60000"), // 1 minute
+  max: parseInt(process.env.PROXY_RATE_LIMIT_MAX || "300"),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Rate limit exceeded for this application. Please try again later.",
+  },
+  keyGenerator: (req) => {
+    // Key by IP + subdomain so limits are per-project per-client
+    const ip = req.clientInfo?.primaryIpAddress || req.ip || "unknown";
+    const subdomain = req.subdomain || "global";
+    return `proxy:${subdomain}:${ip}`;
+  },
+  skip: (req) => {
+    // Only apply to subdomain proxy traffic
+    return !req.subdomain;
+  },
+});
+
 /* ================================================================== */
 /* 3. REQUEST SANITIZATION                                             */
 /* ================================================================== */
@@ -170,5 +202,6 @@ module.exports = {
   graphqlRateLimiter,
   authRateLimiter,
   deployRateLimiter,
+  projectProxyRateLimiter,
   requestSanitizer,
 };

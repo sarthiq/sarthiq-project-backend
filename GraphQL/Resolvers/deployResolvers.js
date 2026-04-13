@@ -11,7 +11,7 @@ const DockerInfo = require("../../Models/Projects/dockerInfo");
 const DeploymentJob = require("../../Models/Deployment/deploymentJob");
 const KubeNode = require("../../Models/Deployment/kubeNode");
 const { deployQueue, wakeQueue } = require("../../Jobs/queues");
-const { deleteProjectResources } = require("../../Utils/kubeClient");
+const { deleteProjectResources, scaleDeployment } = require("../../Utils/kubeClient");
 const { registerNode, releaseNode } = require("../../Utils/nodeManager");
 
 // We'll try to pull user count from the existing User model
@@ -20,6 +20,34 @@ try {
   User = require("../../Models/User/user"); // adjust path if needed
 } catch {
   User = null;
+}
+
+/**
+ * Retain only the last N deployment jobs for a project.
+ * Deletes oldest records beyond the limit.
+ */
+async function enforceDeploymentRetention(projectId, keepCount = 5) {
+  try {
+    const allJobs = await DeploymentJob.findAll({
+      where: { ProjectId: projectId },
+      order: [["createdAt", "DESC"]],
+      attributes: ["id"],
+    });
+    if (allJobs.length > keepCount) {
+      const idsToKeep = allJobs.slice(0, keepCount).map((j) => j.id);
+      await DeploymentJob.destroy({
+        where: {
+          ProjectId: projectId,
+          id: { [Op.notIn]: idsToKeep },
+        },
+      });
+      console.log(
+        `[deploy] Retention: kept ${keepCount}, deleted ${allJobs.length - keepCount} old jobs for project #${projectId}`
+      );
+    }
+  } catch (err) {
+    console.warn(`[deploy] Retention cleanup error: ${err.message}`);
+  }
 }
 
 module.exports = {
@@ -226,7 +254,38 @@ module.exports = {
       dbJob.bullmqJobId = String(bullJob.id);
       await dbJob.save();
 
+      // Enforce deployment log retention — keep only last 5
+      await enforceDeploymentRetention(parseInt(projectId), 5);
+
       return dbJob;
+    },
+
+    /* ── Stop a running project (scale to 0) ───────────────────── */
+    stopProject: async (_, { projectId }, context) => {
+      if (!context.user && !context.admin) throw new Error("Unauthorized");
+
+      const project = await Project.findByPk(projectId);
+      if (!project) throw new Error("Project not found");
+      if (context.user && project.UserId !== context.user.id) {
+        throw new Error("Unauthorized: Not your project");
+      }
+
+      const docker = await DockerInfo.findOne({ where: { ProjectId: projectId } });
+      if (!docker) throw new Error("DockerInfo not found");
+      if (docker.status !== "running") {
+        throw new Error(`Project is '${docker.status}', not running. Cannot stop.`);
+      }
+
+      // Scale K8s deployment to 0 replicas
+      if (project.subdomain) {
+        await scaleDeployment(project.subdomain, 0);
+      }
+
+      // Update status to sleeping
+      await docker.update({ status: "sleeping" });
+
+      console.log(`[deploy] Project #${projectId} stopped (scaled to 0 replicas)`);
+      return true;
     },
 
     /* ── Wake a sleeping project ───────────────────────────────── */

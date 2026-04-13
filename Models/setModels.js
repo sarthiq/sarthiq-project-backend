@@ -48,4 +48,7 @@ exports.setupModels = async () => {
   // UserPlan ↔ UserPlanMapping (1:N)
   UserPlan.hasMany(UserPlanMapping, { foreignKey: "UserPlanId" });
   UserPlanMapping.belongsTo(UserPlan, { foreignKey: "UserPlanId" });
+
+  await Project.sync({ alter: true });
+  await DeploymentJob.sync({ alter: true });
 };

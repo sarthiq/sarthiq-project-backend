@@ -24,7 +24,7 @@ const DeploymentJob = sequelize.define(
         "running",
         "sleeping",
         "failed",
-        "done"
+        "done",
       ),
       defaultValue: "queued",
       allowNull: false,
@@ -51,6 +51,14 @@ const DeploymentJob = sequelize.define(
       type: DataTypes.TEXT("long"), // The Dockerfile actually used for the build
       allowNull: true,
     },
+    commitSha: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    commitMessage: {
+      type: DataTypes.STRING(500),
+      allowNull: true,
+    },
     startedAt: {
       type: DataTypes.DATE,
       allowNull: true,
@@ -72,7 +80,7 @@ const DeploymentJob = sequelize.define(
   {
     tableName: "deploymentJobs",
     timestamps: true,
-  }
+  },
 );
 
 module.exports = DeploymentJob;

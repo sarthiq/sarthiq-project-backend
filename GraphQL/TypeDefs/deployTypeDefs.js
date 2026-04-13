@@ -9,6 +9,8 @@ module.exports = `#graphql
     retryCount: Int
     aiDiagnosis: String        # JSON array of AI diagnosis results
     generatedDockerfile: String
+    commitSha: String
+    commitMessage: String
     startedAt: String
     completedAt: String
     ProjectId: Int
@@ -63,6 +65,7 @@ module.exports = `#graphql
   type Mutation {
     triggerDeploy(projectId: ID!): DeploymentJob
     wakeProject(projectId: ID!): DeploymentJob
+    stopProject(projectId: ID!): Boolean
     deleteProjectDeploy(projectId: ID!): Boolean
     registerKubeNode(nodeName: String!, totalCpuMillicores: Int, totalMemoryMi: Int): NodeStat
   }

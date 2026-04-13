@@ -18,6 +18,7 @@ const {
   helmetMiddleware,
   apiRateLimiter,
   graphqlRateLimiter,
+  projectProxyRateLimiter,
   requestSanitizer,
 } = require("./Middleware/securityMiddleware");
 
@@ -119,8 +120,13 @@ app.use(bodyParser.urlencoded({ limit: "5mb", extended: true }));
 // ── Request sanitization (strip null bytes, etc.) ─────────────────
 app.use(requestSanitizer);
 
-// ── Rate limiting (global) ────────────────────────────────────────
-app.use(apiRateLimiter);
+// ── Rate limiting (global — platform API only) ────────────────────
+// IMPORTANT: Skip for subdomain proxy traffic — those get a separate
+// rate limiter applied inside the subdomain bypass block below.
+app.use((req, res, next) => {
+  if (req.subdomain) return next(); // skip global rate limiter for deployed projects
+  return apiRateLimiter(req, res, next);
+});
 
 // Custom error handler for invalid JSON
 app.use((err, req, res, next) => {
@@ -145,10 +151,14 @@ app.use(activityLogger);
 // ── Route Bypass: subdomain requests go straight to sleepProxy ────
 // This prevents SarthiQ API routes from intercepting the deployed
 // project's own routes (e.g., project has /admin, /user, /api/github).
+// Apply the project-specific rate limiter BEFORE proxying.
 app.use((req, res, next) => {
   if (req.subdomain) {
-    // Skip all API routes — hand off to sleepProxyHandler mounted below
-    return sleepProxyHandler(req, res, next);
+    // Apply separate rate limiter for deployed project traffic
+    return projectProxyRateLimiter(req, res, (err) => {
+      if (err) return next(err);
+      return sleepProxyHandler(req, res, next);
+    });
   }
   next();
 });

@@ -85,6 +85,11 @@ const Project = sequelize.define(
       allowNull: true,
       defaultValue: false,
     },
+    autoDeployOnPush: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
     UserId: {
       type: DataTypes.INTEGER,
       allowNull: false,
