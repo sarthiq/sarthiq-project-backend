@@ -470,15 +470,20 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
   } = detection;
 
   // Use forgiving install commands — 'npm ci' and '--frozen-lockfile' fail
-  // when lock files are out of sync, which is common on user-submitted repos.
-  // Fallback: try strict first, fall back to permissive install.
+  // when lock files are out of sync or missing, which is common on user-submitted repos.
+  // Strategy: check for lockfile existence, then use strict or permissive install.
   // Use BuildKit cache mounts to persist npm/yarn/pnpm cache across builds.
   const installCmd =
     packageManager === "yarn"
       ? "RUN --mount=type=cache,target=/root/.yarn YARN_CACHE_FOLDER=/root/.yarn yarn install --frozen-lockfile || yarn install"
       : packageManager === "pnpm"
         ? "RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile || pnpm install"
-        : "RUN --mount=type=cache,target=/root/.npm npm ci --legacy-peer-deps || npm install --legacy-peer-deps";
+        : "RUN --mount=type=cache,target=/root/.npm if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi";
+
+  // Robust COPY for package files: package.json is required,
+  // lockfiles are optional — use separate COPY so missing lockfiles don't fail.
+  // Docker's COPY with wildcard only fails if NO files match; package*.json always matches package.json.
+  const copyPackageFiles = `COPY package.json package-lock.jso[n] yarn.loc[k] pnpm-lock.yam[l] ./`;
 
   // Build-time ARG + ENV lines
   const buildArgLines = Object.keys(buildTimeEnvs)
@@ -491,7 +496,7 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
@@ -528,7 +533,7 @@ CMD ["nginx", "-g", "daemon off;"]
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
@@ -559,7 +564,7 @@ CMD ["npm", "start"]
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
@@ -592,7 +597,7 @@ CMD ["node", ".output/server/index.mjs"]
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS deps
 WORKDIR /app
-COPY package*.json yarn.lock* pnpm-lock.yaml* ./
+${copyPackageFiles}
 ${installCmd}
 
 FROM node:20-alpine AS builder

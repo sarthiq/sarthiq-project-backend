@@ -134,12 +134,29 @@ async function buildDockerImage({
     args.push("--cache-from", `type=registry,ref=${cacheRef}`);
     args.push("--cache-to", `type=registry,ref=${cacheRef},mode=max`);
   } else {
-    // LOCAL (minikube): Use local directory-based caching
-    const localCacheDir = path.join(CACHE_DIR, subdomain || "default");
-    // Ensure cache dir exists
-    fs.mkdirSync(localCacheDir, { recursive: true });
-    args.push("--cache-from", `type=local,src=${localCacheDir}`);
-    args.push("--cache-to", `type=local,dest=${localCacheDir},mode=max`);
+    // LOCAL (minikube/dev): Use local directory-based caching
+    // IMPORTANT: --cache-from and --cache-to MUST use SEPARATE directories.
+    // Using the same dir causes corruption because BuildKit clears dest before writing.
+    const cacheBase = path.join(CACHE_DIR, subdomain || "default");
+    const cacheSrc = path.join(cacheBase, "current");
+    const cacheDest = path.join(cacheBase, "new");
+
+    // Ensure directories exist
+    fs.mkdirSync(cacheSrc, { recursive: true });
+    fs.mkdirSync(cacheDest, { recursive: true });
+
+    // Only add --cache-from if cache dir has actual content (index.json exists)
+    const cacheIndexPath = path.join(cacheSrc, "index.json");
+    if (fs.existsSync(cacheIndexPath)) {
+      args.push("--cache-from", `type=local,src=${cacheSrc}`);
+    }
+    // Always write new cache
+    args.push("--cache-to", `type=local,dest=${cacheDest},mode=max`);
+
+    // After build completes, swap: move 'new' → 'current' for next build
+    // We do this via a post-build hook (caller handles it after success)
+    // Store for the caller to swap after successful build
+    buildDockerImage._pendingCacheSwap = { src: cacheDest, dest: cacheSrc };
   }
 
   // Tag and context
@@ -560,6 +577,21 @@ const deployWorker = new Worker(
           buildSuccess = true;
           const buildDurationMs = Date.now() - buildStartTime;
           const imageSizeMB = await getImageSizeMB(imageTag);
+
+          // Swap cache directories: 'new' → 'current' for next build
+          if (buildDockerImage._pendingCacheSwap) {
+            const { src, dest } = buildDockerImage._pendingCacheSwap;
+            try {
+              // Clear old 'current' cache
+              fs.rmSync(dest, { recursive: true, force: true });
+              // Rename 'new' → 'current'
+              fs.renameSync(src, dest);
+              jobRecord.cacheHit = false; // first successful write = miss
+            } catch (swapErr) {
+              console.warn(`[deployWorker] Cache swap failed (non-fatal): ${swapErr.message}`);
+            }
+            buildDockerImage._pendingCacheSwap = null;
+          }
 
           jobRecord.buildDurationMs = buildDurationMs;
           jobRecord.imageSizeMB = imageSizeMB;
