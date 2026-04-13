@@ -111,6 +111,7 @@ async function buildDockerImage({
   buildTimeEnvs = {},
   timeout = 600_000,
   subdomain = "",
+  cacheTag = "",
   onProgress = null,
 }) {
   // Validate image tag
@@ -127,40 +128,28 @@ async function buildDockerImage({
     args.push("--build-arg", `${key}=${value}`);
   }
 
-  // ── BuildKit cache strategy (dual-mode) ──────────────────────────
+  // ── BuildKit cache strategy ────────────────────────────────────────
   if (REGISTRY) {
     // PRODUCTION: Use registry-based caching
     const cacheRef = `${REGISTRY}/${subdomain || "sarthiq"}:cache`;
     args.push("--cache-from", `type=registry,ref=${cacheRef}`);
     args.push("--cache-to", `type=registry,ref=${cacheRef},mode=max`);
   } else {
-    // LOCAL (minikube/dev): Use local directory-based caching
-    // IMPORTANT: --cache-from and --cache-to MUST use SEPARATE directories.
-    // Using the same dir causes corruption because BuildKit clears dest before writing.
-    const cacheBase = path.join(CACHE_DIR, subdomain || "default");
-    const cacheSrc = path.join(cacheBase, "current");
-    const cacheDest = path.join(cacheBase, "new");
-
-    // Ensure directories exist
-    fs.mkdirSync(cacheSrc, { recursive: true });
-    fs.mkdirSync(cacheDest, { recursive: true });
-
-    // Only add --cache-from if cache dir has actual content (index.json exists)
-    const cacheIndexPath = path.join(cacheSrc, "index.json");
-    if (fs.existsSync(cacheIndexPath)) {
-      args.push("--cache-from", `type=local,src=${cacheSrc}`);
-    }
-    // Always write new cache
-    args.push("--cache-to", `type=local,dest=${cacheDest},mode=max`);
-
-    // After build completes, swap: move 'new' → 'current' for next build
-    // We do this via a post-build hook (caller handles it after success)
-    // Store for the caller to swap after successful build
-    buildDockerImage._pendingCacheSwap = { src: cacheDest, dest: cacheSrc };
+    // LOCAL (Docker Desktop): Use inline cache
+    // --cache-from references the STABLE tag (subdomain:latest) from the previous build.
+    // --build-arg BUILDKIT_INLINE_CACHE=1 embeds cache metadata into the new image.
+    // This way the next build can pull cache layers from the previous "latest" image.
+    const stableTag = cacheTag || `${subdomain || "sarthiq"}:latest`;
+    args.push("--cache-from", stableTag);
+    args.push("--build-arg", "BUILDKIT_INLINE_CACHE=1");
   }
 
-  // Tag and context
-  args.push("-t", imageTag, buildContext);
+  // Tag with both the unique tag AND the stable :latest tag for future cache
+  args.push("-t", imageTag);
+  if (cacheTag) {
+    args.push("-t", cacheTag); // also tag as :latest for next build's --cache-from
+  }
+  args.push(buildContext);
 
   // Enable BuildKit via environment variable
   const buildEnv = { ...process.env, DOCKER_BUILDKIT: "1" };
@@ -572,15 +561,29 @@ const deployWorker = new Worker(
       /* ── STEP 7: Build Docker image (with BuildKit + AI retry loop) ── */
       await appendLog(jobRecord, "Step 8/12: 🔨 Building Docker image (BuildKit enabled)...");
 
-      // Smart image tagging: dependency-hash + timestamp for cache reuse
+      // Smart image tagging: dependency-hash + timestamp for unique deploys
       const depHash = contextOptimization.dependencyHash || Date.now();
       const timestamp = Date.now();
       const imageTag = REGISTRY
         ? `${REGISTRY}/${project.subdomain}:${depHash}-${timestamp}`
         : `${project.subdomain}:${depHash}-${timestamp}`;
+      // Stable tag for cache: always "latest" so --cache-from can find the previous build
+      const cacheTag = REGISTRY
+        ? `${REGISTRY}/${project.subdomain}:latest`
+        : `${project.subdomain}:latest`;
 
       // Validate image tag
       validateImageTag(imageTag);
+
+      // Check if previous image exists (for cache HIT detection)
+      let previousImageExists = false;
+      try {
+        await spawnAsync("docker", ["image", "inspect", cacheTag], { timeout: 5000 });
+        previousImageExists = true;
+      } catch {
+        previousImageExists = false;
+      }
+      buildDockerImage._previousImageExisted = previousImageExists;
 
       const buildStartTime = Date.now();
       let buildSuccess = false;
@@ -601,6 +604,7 @@ const deployWorker = new Worker(
             buildContext,
             buildTimeEnvs: detection.buildTimeEnvs,
             subdomain: project.subdomain,
+            cacheTag, // pass stable cache tag
             onProgress: (line) => {
               // Log significant build progress lines (skip empty/noise)
               if (line && line.trim() && !line.includes("#")) {
@@ -613,20 +617,24 @@ const deployWorker = new Worker(
           const buildDurationMs = Date.now() - buildStartTime;
           const imageSizeMB = await getImageSizeMB(imageTag);
 
-          // Swap cache directories: 'new' → 'current' for next build
+          // Cache HIT detection:
+          // With inline cache, the first build is always a MISS (no previous image).
+          // Subsequent builds use --cache-from=imageTag which pulls layers from the old image.
+          // We detect HIT simply by checking if the image existed BEFORE this build started.
           if (buildDockerImage._pendingCacheSwap) {
+            // Legacy local cache swap (production with registry)
             const { src, dest } = buildDockerImage._pendingCacheSwap;
             try {
-              // Clear old 'current' cache
               fs.rmSync(dest, { recursive: true, force: true });
-              // Rename 'new' → 'current'
               fs.renameSync(src, dest);
-              jobRecord.cacheHit = false; // first successful write = miss
             } catch (swapErr) {
               console.warn(`[deployWorker] Cache swap failed (non-fatal): ${swapErr.message}`);
             }
             buildDockerImage._pendingCacheSwap = null;
           }
+          // Inline cache: check if previous image existed (set before build starts)
+          jobRecord.cacheHit = !!buildDockerImage._previousImageExisted;
+          buildDockerImage._cacheFromUsed = undefined;
 
           jobRecord.buildDurationMs = buildDurationMs;
           jobRecord.imageSizeMB = imageSizeMB;
