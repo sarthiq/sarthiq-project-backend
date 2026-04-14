@@ -114,11 +114,27 @@ app.use(
 app.get("/github/setup", handleSetupRedirect);
 
 // ── Body parser with REDUCED limits (was 50MB — too large) ────────
-app.use(bodyParser.json({ limit: "5mb" }));
-app.use(bodyParser.urlencoded({ limit: "5mb", extended: true }));
+// IMPORTANT: Skip body parsing for subdomain (proxy) requests!
+// http-proxy-middleware needs the raw, unconsumed request stream to forward
+// the body to the target container. If bodyParser reads the stream first,
+// the proxy has nothing to forward — causing POST/PUT/PATCH to hang or fail.
+// This also fixes tunneling issues where the tunnel streams the body lazily
+// and bodyParser's eager consumption causes timeouts.
+app.use((req, res, next) => {
+  if (req.subdomain) return next(); // skip body parser for proxied project traffic
+  bodyParser.json({ limit: "5mb" })(req, res, next);
+});
+app.use((req, res, next) => {
+  if (req.subdomain) return next();
+  bodyParser.urlencoded({ limit: "5mb", extended: true })(req, res, next);
+});
 
 // ── Request sanitization (strip null bytes, etc.) ─────────────────
-app.use(requestSanitizer);
+// Skip for subdomain proxy traffic — body isn't parsed for those requests
+app.use((req, res, next) => {
+  if (req.subdomain) return next();
+  requestSanitizer(req, res, next);
+});
 
 // ── Rate limiting (global — platform API only) ────────────────────
 // IMPORTANT: Skip for subdomain proxy traffic — those get a separate
