@@ -37,6 +37,8 @@ const {
   createIngress,
   waitForReady,
   createOrUpdateNetworkPolicy,
+  patchDeploymentImage,
+  deploymentExists,
 } = require("../Utils/kubeClient");
 const {
   getBestNode,
@@ -109,7 +111,7 @@ async function buildDockerImage({
   imageTag,
   buildContext,
   buildTimeEnvs = {},
-  timeout = 600_000,
+  timeout = 900_000,
   subdomain = "",
   cacheTag = "",
   onProgress = null,
@@ -719,13 +721,23 @@ const deployWorker = new Worker(
       /* ── STEP 9: Push image (with BuildKit --- cache already exported) ─ */
       if (REGISTRY) {
         await appendLog(jobRecord, "Step 9/12: 🚀 Pushing image to registry...");
+        // Push both the unique tag and the cache tag in one operation
         // BuildKit cache is already exported during build via --cache-to.
-        // We only need to push the main image tag.
         const pushStartTime = Date.now();
+        // Push main image tag
         await spawnAsync("docker", ["push", imageTag], {
           timeout: 600_000,
           env: { ...process.env, DOCKER_BUILDKIT: "1" },
         });
+        // Push cache tag (enables --cache-from on next build)
+        if (cacheTag && cacheTag !== imageTag) {
+          await spawnAsync("docker", ["push", cacheTag], {
+            timeout: 300_000,
+            env: { ...process.env, DOCKER_BUILDKIT: "1" },
+          }).catch((pushCacheErr) => {
+            console.warn(`[deployWorker] Cache tag push failed (non-fatal): ${pushCacheErr.message.slice(0, 100)}`);
+          });
+        }
         const pushDuration = ((Date.now() - pushStartTime) / 1000).toFixed(1);
         await appendLog(jobRecord, `  → Push complete (${pushDuration}s).`);
       } else {
@@ -738,80 +750,104 @@ const deployWorker = new Worker(
         tmpDir = null;
       }
 
-      /* ── STEP 10: Create K8s resources (with security context) ───── */
-      await appendLog(jobRecord, "Step 10/12: Creating Kubernetes resources...");
-
-      const cpuLimit = dockerInfo.cpu || securityConfig.maxCpu || "500m";
-      let memLimit = dockerInfo.memory || securityConfig.maxMemory || "512Mi";
-      if (memLimit.match(/^\d+m$/)) {
-        memLimit = memLimit.replace("m", "Mi");
-      }
-
+      /* ── STEP 10: Create/Update K8s resources ────────────────────── */
       const deployName = project.subdomain;
 
-      await createDeployment({
-        name: deployName,
-        image: imageTag,
-        containerPort,
-        cpuLimit,
-        memoryLimit: memLimit,
-        cpuRequest: "100m",
-        memoryRequest: "128Mi",
-        envVars: detection.runtimeEnvs,
-        // ── nodeName is for DB tracking only — NOT used for K8s nodeSelector ──
-        nodeName: node.nodeName,
-        useConfigMap: true,
-        // ── Security configuration ──
-        executionMode: execMode,
-        podSecurityContext: securityConfig.podSecurityContext,
-        containerSecurityContext: securityConfig.containerSecurityContext,
-        runtimeClassName: securityConfig.runtimeClassName,
-        labels: {
-          ...securityConfig.labels,
-          "sarthiq.com/userId": String(userId),
-          "sarthiq.com/projectId": String(projectId),
-        },
-        namespace: securityConfig.namespace,
-        activeDeadlineSeconds: securityConfig.activeDeadlineSeconds,
-        // ── NEW: pass single-node flag for control-plane toleration ──
-        isSingleNodeCluster: isSingleNode,
-      });
-      await appendLog(jobRecord, `  → Deployment + ConfigMap created (mode: ${execMode}).`);
+      // ── RE-DEPLOY FAST PATH ──────────────────────────────────────
+      // Check if K8s resources already exist from a previous deployment.
+      // If yes: patch ONLY the image (rolling update) — skip Service/Ingress recreation.
+      // If no: full resource creation (first deploy).
+      const isRedeployK8s = await deploymentExists(deployName);
 
-      // Apply network policy
-      if (securityConfig.networkPolicy) {
+      if (isRedeployK8s) {
+        /* ── FAST PATH: Re-deploy (image-only patch) ─────────────── */
+        await appendLog(jobRecord, "Step 10/12: ⚡ Rolling update (re-deploy detected)...");
+
+        await patchDeploymentImage(
+          deployName,
+          imageTag,
+          detection.runtimeEnvs // update ConfigMap with latest env vars
+        );
+        await appendLog(jobRecord, `  → Deployment image patched (rolling update initiated).`);
+        await appendLog(jobRecord, `  → ⚡ Skipped Service/Ingress recreation (already exist).`);
+
+      } else {
+        /* ── FULL PATH: First deploy (create all resources) ─────── */
+        await appendLog(jobRecord, "Step 10/12: Creating Kubernetes resources...");
+
+        const cpuLimit = dockerInfo.cpu || securityConfig.maxCpu || "500m";
+        let memLimit = dockerInfo.memory || securityConfig.maxMemory || "512Mi";
+        if (memLimit.match(/^\d+m$/)) {
+          memLimit = memLimit.replace("m", "Mi");
+        }
+
+        await createDeployment({
+          name: deployName,
+          image: imageTag,
+          containerPort,
+          cpuLimit,
+          memoryLimit: memLimit,
+          cpuRequest: "100m",
+          memoryRequest: "128Mi",
+          envVars: detection.runtimeEnvs,
+          // ── nodeName is for DB tracking only — NOT used for K8s nodeSelector ──
+          nodeName: node.nodeName,
+          useConfigMap: true,
+          // ── Security configuration ──
+          executionMode: execMode,
+          podSecurityContext: securityConfig.podSecurityContext,
+          containerSecurityContext: securityConfig.containerSecurityContext,
+          runtimeClassName: securityConfig.runtimeClassName,
+          labels: {
+            ...securityConfig.labels,
+            "sarthiq.com/userId": String(userId),
+            "sarthiq.com/projectId": String(projectId),
+          },
+          namespace: securityConfig.namespace,
+          activeDeadlineSeconds: securityConfig.activeDeadlineSeconds,
+          // ── NEW: pass single-node flag for control-plane toleration ──
+          isSingleNodeCluster: isSingleNode,
+        });
+        await appendLog(jobRecord, `  → Deployment + ConfigMap created (mode: ${execMode}).`);
+
+        // Apply network policy
+        if (securityConfig.networkPolicy) {
+          try {
+            await createOrUpdateNetworkPolicy(securityConfig.networkPolicy);
+            await appendLog(jobRecord, "  → NetworkPolicy applied.");
+          } catch (npErr) {
+            // Non-fatal — NetworkPolicy requires a CNI that supports it
+            await appendLog(jobRecord, `  ⚠ NetworkPolicy could not be applied: ${npErr.message}`);
+          }
+        }
+
+        const svcHost = await createService({ name: deployName, containerPort });
+        await appendLog(jobRecord, `  → Service created: ${svcHost}`);
+
+        // Ingress creation is non-fatal: the platform routes traffic via
+        // system Nginx → sleepProxy → ClusterIP, not through K8s Ingress.
         try {
-          await createOrUpdateNetworkPolicy(securityConfig.networkPolicy);
-          await appendLog(jobRecord, "  → NetworkPolicy applied.");
-        } catch (npErr) {
-          // Non-fatal — NetworkPolicy requires a CNI that supports it
-          await appendLog(jobRecord, `  ⚠ NetworkPolicy could not be applied: ${npErr.message}`);
+          await createIngress({
+            name: deployName,
+            subdomain: project.subdomain,
+            baseDomain: DEPLOY_DOMAIN,
+          });
+          await appendLog(jobRecord, `  → Ingress created.`);
+        } catch (ingressErr) {
+          await appendLog(jobRecord, `  ⚠ Ingress creation skipped (non-fatal): ${ingressErr.message?.slice(0, 150)}`);
+          console.warn(`[deployWorker] Ingress creation failed for ${deployName}: ${ingressErr.message?.slice(0, 200)}`);
         }
       }
 
-      const svcHost = await createService({ name: deployName, containerPort });
-      await appendLog(jobRecord, `  → Service created: ${svcHost}`);
-
-      // Ingress creation is non-fatal: the platform routes traffic via
-      // system Nginx → sleepProxy → ClusterIP, not through K8s Ingress.
       let publicHost = `${project.subdomain}.${DEPLOY_DOMAIN}`;
-      try {
-        publicHost = await createIngress({
-          name: deployName,
-          subdomain: project.subdomain,
-          baseDomain: DEPLOY_DOMAIN,
-        });
-        await appendLog(jobRecord, `  → Ingress created: ${publicHost}`);
-      } catch (ingressErr) {
-        await appendLog(jobRecord, `  ⚠ Ingress creation skipped (non-fatal): ${ingressErr.message?.slice(0, 150)}`);
-        console.warn(`[deployWorker] Ingress creation failed for ${deployName}: ${ingressErr.message?.slice(0, 200)}`);
-      }
 
       /* ── STEP 11: Wait for pod ready (with diagnostics) ───────────── */
-      await appendLog(jobRecord, "Step 11/12: Waiting for pod to become ready...");
+      // Use shorter timeout for re-deploys: image is likely cached on node
+      const readyTimeout = isRedeployK8s ? 60_000 : 180_000;
+      await appendLog(jobRecord, `Step 11/12: Waiting for pod to become ready${isRedeployK8s ? " (⚡ fast timeout)" : ""}...`);
 
       try {
-        await waitForReady(deployName, 180_000);
+        await waitForReady(deployName, readyTimeout);
         await appendLog(jobRecord, "  → Pod is running! 🚀");
       } catch (readyErr) {
         // Pod failed to become ready — extract diagnostic details

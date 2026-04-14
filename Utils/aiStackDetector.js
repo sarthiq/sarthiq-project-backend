@@ -500,6 +500,10 @@ ${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
+ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
+ENV NODE_OPTIONS="--max-old-space-size=512"
+# Relax TypeScript strict checks that fail builds on unused variables (TS6133)
+RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"}
 
 FROM nginxinc/nginx-unprivileged:alpine
@@ -537,7 +541,11 @@ ${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1 CI=false NEXT_LINT_DURING_BUILD=false
+ENV TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
+ENV NODE_OPTIONS="--max-old-space-size=512"
+# Relax TypeScript strict checks that fail builds on unused variables (TS6133)
+RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"} && \
     npm prune --production 2>/dev/null; rm -rf .next/cache
 
@@ -568,6 +576,10 @@ ${copyPackageFiles}
 ${installCmd}
 COPY . .
 ${buildArgLines}
+ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
+ENV NODE_OPTIONS="--max-old-space-size=512"
+# Relax TypeScript strict checks that fail builds on unused variables (TS6133)
+RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"}
 
 FROM node:20-alpine
@@ -605,6 +617,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ${buildArgLines}
+ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
+ENV NODE_OPTIONS="--max-old-space-size=512"
+# Relax TypeScript strict checks that fail builds on unused variables (TS6133)
+RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 ${buildStep}
 # Remove dev dependencies for smaller production image
 RUN npm prune --production 2>/dev/null; true

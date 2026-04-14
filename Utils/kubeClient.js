@@ -1241,6 +1241,97 @@ async function deleteServiceIngress(ingressName, namespace) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* PATCH: Update only the container image (fast re-deploy)              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Patch ONLY the container image on an existing deployment.
+ * This is significantly faster than replacing the entire Deployment spec
+ * because K8s only needs to pull the new image layers and do a rolling update.
+ *
+ * Used for re-deploys when Service/Ingress/ConfigMap already exist.
+ *
+ * @param {string} name - deployment name (will be safeLabel'd)
+ * @param {string} newImage - full image tag (e.g. registry.sarthiq.com/my-app:abc123)
+ * @param {object} [envVars] - optional updated env vars (updates ConfigMap if provided)
+ * @param {string} [namespace] - target namespace (default: NAMESPACE)
+ * @returns {Promise<string>} label
+ */
+async function patchDeploymentImage(name, newImage, envVars = null, namespace = null) {
+  const label = safeLabel(name);
+  const targetNamespace = namespace || NAMESPACE;
+
+  // Patch the deployment's container image using a strategic merge patch
+  const patch = {
+    spec: {
+      template: {
+        metadata: {
+          // Force a rollout even if the image tag is the same (e.g., :latest)
+          annotations: {
+            "sarthiq.com/restartedAt": new Date().toISOString(),
+          },
+        },
+        spec: {
+          containers: [
+            {
+              name: label,
+              image: newImage,
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  await appsV1.patchNamespacedDeployment(
+    {
+      name: label,
+      namespace: targetNamespace,
+      body: patch,
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { headers: { "Content-Type": "application/strategic-merge-patch+json" } },
+  );
+
+  // If env vars were updated, also update the ConfigMap
+  if (envVars && Object.keys(envVars).length > 0) {
+    await createOrUpdateConfigMap({
+      name: label,
+      envVars,
+      namespace: targetNamespace,
+    });
+  }
+
+  console.log(`[kubeClient] ⚡ Patched deployment '${label}' → image: ${newImage.slice(0, 80)}`);
+  return label;
+}
+
+/**
+ * Check if a deployment already exists in K8s.
+ * Used to determine if we should do a fast image-only patch (re-deploy)
+ * or a full resource creation (first deploy).
+ *
+ * @param {string} name - deployment name (will be safeLabel'd)
+ * @param {string} [namespace] - target namespace (default: NAMESPACE)
+ * @returns {Promise<boolean>}
+ */
+async function deploymentExists(name, namespace = null) {
+  const label = safeLabel(name);
+  const targetNamespace = namespace || NAMESPACE;
+  try {
+    await appsV1.readNamespacedDeployment({ name: label, namespace: targetNamespace });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   createDeployment,
   createService,
@@ -1263,4 +1354,6 @@ module.exports = {
   safeLabel,
   NAMESPACE,
   diagnosePodFailure,
+  patchDeploymentImage,
+  deploymentExists,
 };
