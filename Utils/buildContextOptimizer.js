@@ -190,6 +190,37 @@ const SAFETY_NEGATIONS = [
   "!server/**",
   "!client",
   "!client/**",
+  // Common source directories that should NEVER be excluded
+  "!store",
+  "!store/**",
+  "!hooks",
+  "!hooks/**",
+  "!utils",
+  "!utils/**",
+  "!services",
+  "!services/**",
+  "!types",
+  "!types/**",
+  "!context",
+  "!context/**",
+  "!providers",
+  "!providers/**",
+  "!middleware",
+  "!middleware/**",
+  "!helpers",
+  "!helpers/**",
+  "!api",
+  "!api/**",
+  "!models",
+  "!models/**",
+  "!config",
+  "!config/**",
+  "!constants",
+  "!constants/**",
+  "!assets",
+  "!assets/**",
+  "!static",
+  "!static/**",
   "!package.json",
   "!package-lock.json",
   "!yarn.lock",
@@ -326,12 +357,18 @@ Respond with ONLY the patterns (no markdown, no explanation):`;
           "pages", "pages/", "components", "components/", "styles", "styles/",
           "assets", "assets/", "static", "static/", "server", "server/",
           "client", "client/", "frontend", "frontend/", "backend", "backend/",
+          // Common source directories that AI sometimes incorrectly excludes
+          "store", "store/", "hooks", "hooks/", "utils", "utils/",
+          "services", "services/", "types", "types/", "context", "context/",
+          "providers", "providers/", "middleware", "middleware/",
+          "helpers", "helpers/", "api", "api/", "models", "models/",
+          "config", "config/", "constants", "constants/",
         ];
         if (BLOCKED_EXACT.includes(l)) return false;
         // Block wildcard patterns targeting source extensions
         if (/^\*\.\w+$/.test(l) && /\.(js|ts|tsx|jsx|css|scss|html|json|vue|svelte|py|go|java|rb|rs|php|c|cpp|h)$/.test(l)) return false;
         // Block patterns that exclude entire src-like directories
-        if (/^(src|app|lib|public|pages|components|styles|assets|static|server|client)\b/.test(l)) return false;
+        if (/^(src|app|lib|public|pages|components|styles|assets|static|server|client|store|hooks|utils|services|types|context|providers|middleware|helpers|api|models|config|constants)\b/.test(l)) return false;
         return true;
       });
 
