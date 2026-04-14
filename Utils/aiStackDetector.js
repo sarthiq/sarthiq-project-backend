@@ -547,8 +547,8 @@ ENV TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
 ENV NODE_OPTIONS="--max-old-space-size=1536"
 # Relax TypeScript strict checks that fail builds on unused variables (TS6133)
 RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
-RUN ${buildCommand || "npm run build"} && \
-    npm prune --production 2>/dev/null; rm -rf .next/cache
+RUN ${buildCommand || "npm run build"}
+RUN npm prune --production 2>/dev/null; rm -rf .next/cache; true
 
 FROM node:20-alpine
 WORKDIR /app
