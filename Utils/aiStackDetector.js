@@ -473,12 +473,13 @@ function generateDockerfile(detection, buildTimeEnvs = {}) {
   // when lock files are out of sync or missing, which is common on user-submitted repos.
   // Strategy: check for lockfile existence, then use strict or permissive install.
   // Use BuildKit cache mounts to persist npm/yarn/pnpm cache across builds.
+  // --prefer-offline: use cached packages first (HUGE speed boost on re-builds)
   const installCmd =
     packageManager === "yarn"
-      ? "RUN --mount=type=cache,target=/root/.yarn YARN_CACHE_FOLDER=/root/.yarn yarn install --frozen-lockfile || yarn install"
+      ? "RUN --mount=type=cache,target=/root/.yarn YARN_CACHE_FOLDER=/root/.yarn yarn install --frozen-lockfile --prefer-offline || yarn install --prefer-offline"
       : packageManager === "pnpm"
         ? "RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile || pnpm install"
-        : "RUN --mount=type=cache,target=/root/.npm if [ -f package-lock.json ]; then npm ci --legacy-peer-deps; else npm install --legacy-peer-deps; fi";
+        : "RUN --mount=type=cache,target=/root/.npm npm set cache /root/.npm && if [ -f package-lock.json ]; then npm ci --legacy-peer-deps --prefer-offline; else npm install --legacy-peer-deps --prefer-offline; fi";
 
   // Robust COPY for package files: package.json is required,
   // lockfiles are optional — use separate COPY so missing lockfiles don't fail.
@@ -501,7 +502,7 @@ ${installCmd}
 COPY . .
 ${buildArgLines}
 ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
-ENV NODE_OPTIONS="--max-old-space-size=512"
+ENV NODE_OPTIONS="--max-old-space-size=1536"
 # Relax TypeScript strict checks that fail builds on unused variables (TS6133)
 RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"}
@@ -543,7 +544,7 @@ COPY . .
 ${buildArgLines}
 ENV NEXT_TELEMETRY_DISABLED=1 CI=false NEXT_LINT_DURING_BUILD=false
 ENV TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
-ENV NODE_OPTIONS="--max-old-space-size=512"
+ENV NODE_OPTIONS="--max-old-space-size=1536"
 # Relax TypeScript strict checks that fail builds on unused variables (TS6133)
 RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"} && \
@@ -577,7 +578,7 @@ ${installCmd}
 COPY . .
 ${buildArgLines}
 ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
-ENV NODE_OPTIONS="--max-old-space-size=512"
+ENV NODE_OPTIONS="--max-old-space-size=1536"
 # Relax TypeScript strict checks that fail builds on unused variables (TS6133)
 RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 RUN ${buildCommand || "npm run build"}
@@ -618,7 +619,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ${buildArgLines}
 ENV CI=false TSC_COMPILE_ON_ERROR=true ESLINT_NO_DEV_ERRORS=true
-ENV NODE_OPTIONS="--max-old-space-size=512"
+ENV NODE_OPTIONS="--max-old-space-size=1536"
 # Relax TypeScript strict checks that fail builds on unused variables (TS6133)
 RUN if [ -f tsconfig.json ]; then node -e "var f='tsconfig.json',c=JSON.parse(require('fs').readFileSync(f));c.compilerOptions=c.compilerOptions||{};c.compilerOptions.noUnusedLocals=false;c.compilerOptions.noUnusedParameters=false;require('fs').writeFileSync(f,JSON.stringify(c,null,2))" 2>/dev/null; fi || true
 ${buildStep}

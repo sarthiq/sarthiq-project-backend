@@ -79,6 +79,22 @@ const MAX_AI_RETRIES = Math.min(parseInt(process.env.MAX_AI_RETRIES || "3"), 5);
 // ── BuildKit cache directory (for local/minikube mode) ─────────────────
 const CACHE_DIR = process.env.SARTHIQ_CACHE_DIR || path.join(os.tmpdir(), "sarthiq-cache");
 
+// ── Pre-pull common base images in background ──────────────────────────
+// This prevents the first build from waiting 10-30s to download node:20-alpine.
+// Runs async on worker start — non-blocking.
+(async () => {
+  const baseImages = ["node:20-alpine", "nginxinc/nginx-unprivileged:alpine", "python:3.12-slim"];
+  for (const img of baseImages) {
+    try {
+      await spawnAsync("docker", ["pull", img], { timeout: 120_000 });
+      console.log(`[deployWorker] ✓ Pre-pulled base image: ${img}`);
+    } catch {
+      // Non-fatal — image will be pulled during build if needed
+      console.log(`[deployWorker] ⚠ Pre-pull skipped: ${img} (will download during build)`);
+    }
+  }
+})();
+
 /* ------------------------------------------------------------------ */
 /* Helper: append a SANITIZED log line to the DeploymentJob record     */
 /* ------------------------------------------------------------------ */
@@ -105,8 +121,57 @@ function generateSubdomain(title, projectId) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Helper: build Docker image with BuildKit + caching (OPTIMIZED)       */
+/* Helper: ensure buildx builder is ready                               */
 /* ------------------------------------------------------------------ */
+let _buildxReady = false;
+async function ensureBuildxBuilder() {
+  if (_buildxReady) return;
+
+  if (REGISTRY) {
+    // PRODUCTION: Use docker-container driver for --push support
+    try {
+      await spawnAsync("docker", ["buildx", "inspect", "sarthiq-builder"], { timeout: 5000 });
+      await spawnAsync("docker", ["buildx", "use", "sarthiq-builder"], { timeout: 5000 });
+    } catch {
+      try {
+        await spawnAsync("docker", [
+          "buildx", "create", "--name", "sarthiq-builder",
+          "--driver", "docker-container", "--use",
+        ], { timeout: 30000 });
+        console.log("[deployWorker] ✓ Created buildx builder (docker-container driver)");
+      } catch (e) {
+        console.warn(`[deployWorker] ⚠ Buildx builder creation failed: ${e.message?.slice(0, 100)}`);
+      }
+    }
+  } else {
+    // LOCAL: Use default 'docker' driver — it has direct access to
+    // local image cache, so --cache-from with local tags works correctly.
+    // The docker-container driver runs in its own container and CANNOT
+    // access local images, breaking all cache hits.
+    try {
+      await spawnAsync("docker", ["buildx", "use", "default"], { timeout: 5000 });
+      console.log("[deployWorker] ✓ Using default buildx driver (local cache access)");
+    } catch {
+      // Default driver is always available
+    }
+  }
+
+  _buildxReady = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper: build Docker image with BuildKit + caching (OPTIMIZED v3)    */
+/* ------------------------------------------------------------------ */
+/*
+ * OPTIMIZATION SUMMARY (vs v1):
+ *   1. Uses `docker buildx build` instead of `docker build`
+ *      → parallel multi-stage builds, better cache handling
+ *   2. In PRODUCTION: uses `--push` to combine build+push in one step
+ *      → eliminates separate `docker push` (saves 30-60s)
+ *   3. In LOCAL: uses `--load` to import into local docker daemon
+ *   4. Uses `mode=max` caching to cache ALL layers, not just final
+ *   5. Adds `--progress=plain` for better log streaming
+ */
 async function buildDockerImage({
   imageTag,
   buildContext,
@@ -115,6 +180,7 @@ async function buildDockerImage({
   subdomain = "",
   cacheTag = "",
   onProgress = null,
+  pushToRegistry = false, // NEW: combined build+push
 }) {
   // Validate image tag
   validateImageTag(imageTag);
@@ -122,8 +188,11 @@ async function buildDockerImage({
   // Validate env var keys
   validateEnvVars(buildTimeEnvs);
 
+  // Ensure buildx builder is ready
+  await ensureBuildxBuilder();
+
   // Build argument array (NO shell interpolation)
-  const args = ["build"];
+  const args = ["buildx", "build", "--progress=plain"];
 
   // Add build-args safely
   for (const [key, value] of Object.entries(buildTimeEnvs)) {
@@ -132,15 +201,12 @@ async function buildDockerImage({
 
   // ── BuildKit cache strategy ────────────────────────────────────────
   if (REGISTRY) {
-    // PRODUCTION: Use registry-based caching
+    // PRODUCTION: Use registry-based caching with mode=max (cache ALL layers)
     const cacheRef = `${REGISTRY}/${subdomain || "sarthiq"}:cache`;
     args.push("--cache-from", `type=registry,ref=${cacheRef}`);
     args.push("--cache-to", `type=registry,ref=${cacheRef},mode=max`);
   } else {
     // LOCAL (Docker Desktop): Use inline cache
-    // --cache-from references the STABLE tag (subdomain:latest) from the previous build.
-    // --build-arg BUILDKIT_INLINE_CACHE=1 embeds cache metadata into the new image.
-    // This way the next build can pull cache layers from the previous "latest" image.
     const stableTag = cacheTag || `${subdomain || "sarthiq"}:latest`;
     args.push("--cache-from", stableTag);
     args.push("--build-arg", "BUILDKIT_INLINE_CACHE=1");
@@ -151,6 +217,17 @@ async function buildDockerImage({
   if (cacheTag) {
     args.push("-t", cacheTag); // also tag as :latest for next build's --cache-from
   }
+
+  // ── OUTPUT STRATEGY ────────────────────────────────────────────────
+  if (pushToRegistry && REGISTRY) {
+    // PRODUCTION: Combined build+push — streams layers directly to registry
+    // This ELIMINATES the separate `docker push` step (saves 30-60 seconds!)
+    args.push("--push");
+  } else {
+    // LOCAL / no registry: Load image into local docker daemon
+    args.push("--load");
+  }
+
   args.push(buildContext);
 
   // Enable BuildKit via environment variable
@@ -607,6 +684,7 @@ const deployWorker = new Worker(
             buildTimeEnvs: detection.buildTimeEnvs,
             subdomain: project.subdomain,
             cacheTag, // pass stable cache tag
+            pushToRegistry: !!REGISTRY, // Combined build+push in production
             onProgress: (line) => {
               // Log significant build progress lines (skip empty/noise)
               if (line && line.trim() && !line.includes("#")) {
@@ -718,28 +796,11 @@ const deployWorker = new Worker(
       jobRecord.retryCount = retryCount;
       await jobRecord.save();
 
-      /* ── STEP 9: Push image (with BuildKit --- cache already exported) ─ */
+      /* ── STEP 9: Push image ─────────────────────────────────────────── */
       if (REGISTRY) {
-        await appendLog(jobRecord, "Step 9/12: 🚀 Pushing image to registry...");
-        // Push both the unique tag and the cache tag in one operation
-        // BuildKit cache is already exported during build via --cache-to.
-        const pushStartTime = Date.now();
-        // Push main image tag
-        await spawnAsync("docker", ["push", imageTag], {
-          timeout: 600_000,
-          env: { ...process.env, DOCKER_BUILDKIT: "1" },
-        });
-        // Push cache tag (enables --cache-from on next build)
-        if (cacheTag && cacheTag !== imageTag) {
-          await spawnAsync("docker", ["push", cacheTag], {
-            timeout: 300_000,
-            env: { ...process.env, DOCKER_BUILDKIT: "1" },
-          }).catch((pushCacheErr) => {
-            console.warn(`[deployWorker] Cache tag push failed (non-fatal): ${pushCacheErr.message.slice(0, 100)}`);
-          });
-        }
-        const pushDuration = ((Date.now() - pushStartTime) / 1000).toFixed(1);
-        await appendLog(jobRecord, `  → Push complete (${pushDuration}s).`);
+        // When using buildx --push, the image was already pushed during build.
+        // No separate push step needed — saves 30-60 seconds!
+        await appendLog(jobRecord, "Step 9/12: ⚡ Image already pushed during build (buildx --push).");
       } else {
         await appendLog(jobRecord, "Step 9/12: Local testing mode. Skipping registry push.");
       }
@@ -760,15 +821,42 @@ const deployWorker = new Worker(
       const isRedeployK8s = await deploymentExists(deployName);
 
       if (isRedeployK8s) {
-        /* ── FAST PATH: Re-deploy (image-only patch) ─────────────── */
+        /* ── FAST PATH: Re-deploy — reuse createDeployment (it does upsert) ── */
+        /* Skip Service/Ingress since they already exist from the first deploy */
         await appendLog(jobRecord, "Step 10/12: ⚡ Rolling update (re-deploy detected)...");
 
-        await patchDeploymentImage(
-          deployName,
-          imageTag,
-          detection.runtimeEnvs // update ConfigMap with latest env vars
-        );
-        await appendLog(jobRecord, `  → Deployment image patched (rolling update initiated).`);
+        const cpuLimit = dockerInfo.cpu || securityConfig.maxCpu || "500m";
+        let memLimit = dockerInfo.memory || securityConfig.maxMemory || "512Mi";
+        if (memLimit.match(/^\d+m$/)) {
+          memLimit = memLimit.replace("m", "Mi");
+        }
+
+        // createDeployment already handles upsert (read → replace or create)
+        await createDeployment({
+          name: deployName,
+          image: imageTag,
+          containerPort,
+          cpuLimit,
+          memoryLimit: memLimit,
+          cpuRequest: "100m",
+          memoryRequest: "128Mi",
+          envVars: detection.runtimeEnvs,
+          nodeName: node.nodeName,
+          useConfigMap: true,
+          executionMode: execMode,
+          podSecurityContext: securityConfig.podSecurityContext,
+          containerSecurityContext: securityConfig.containerSecurityContext,
+          runtimeClassName: securityConfig.runtimeClassName,
+          labels: {
+            ...securityConfig.labels,
+            "sarthiq.com/userId": String(userId),
+            "sarthiq.com/projectId": String(projectId),
+          },
+          namespace: securityConfig.namespace,
+          activeDeadlineSeconds: securityConfig.activeDeadlineSeconds,
+          isSingleNodeCluster: isSingleNode,
+        });
+        await appendLog(jobRecord, `  → Deployment updated with new image.`);
         await appendLog(jobRecord, `  → ⚡ Skipped Service/Ingress recreation (already exist).`);
 
       } else {

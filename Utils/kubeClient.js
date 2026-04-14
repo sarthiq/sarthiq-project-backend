@@ -1262,42 +1262,28 @@ async function patchDeploymentImage(name, newImage, envVars = null, namespace = 
   const label = safeLabel(name);
   const targetNamespace = namespace || NAMESPACE;
 
-  // Patch the deployment's container image using a strategic merge patch
-  const patch = {
-    spec: {
-      template: {
-        metadata: {
-          // Force a rollout even if the image tag is the same (e.g., :latest)
-          annotations: {
-            "sarthiq.com/restartedAt": new Date().toISOString(),
-          },
-        },
-        spec: {
-          containers: [
-            {
-              name: label,
-              image: newImage,
-            },
-          ],
-        },
-      },
-    },
-  };
+  // Simple read-modify-write: guaranteed to work (same as createDeployment)
+  const existing = await appsV1.readNamespacedDeployment({
+    name: label,
+    namespace: targetNamespace,
+  });
 
-  await appsV1.patchNamespacedDeployment(
-    {
-      name: label,
-      namespace: targetNamespace,
-      body: patch,
-    },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { headers: { "Content-Type": "application/strategic-merge-patch+json" } },
-  );
+  // Update the container image
+  existing.spec.template.spec.containers[0].image = newImage;
+
+  // Force a rollout by adding/updating a restart annotation
+  if (!existing.spec.template.metadata.annotations) {
+    existing.spec.template.metadata.annotations = {};
+  }
+  existing.spec.template.metadata.annotations["sarthiq.com/restartedAt"] =
+    new Date().toISOString();
+
+  // Replace the deployment with the updated spec
+  await appsV1.replaceNamespacedDeployment({
+    name: label,
+    namespace: targetNamespace,
+    body: existing,
+  });
 
   // If env vars were updated, also update the ConfigMap
   if (envVars && Object.keys(envVars).length > 0) {
@@ -1308,7 +1294,7 @@ async function patchDeploymentImage(name, newImage, envVars = null, namespace = 
     });
   }
 
-  console.log(`[kubeClient] ⚡ Patched deployment '${label}' → image: ${newImage.slice(0, 80)}`);
+  console.log(`[kubeClient] ⚡ Updated deployment '${label}' → image: ${newImage.slice(0, 80)}`);
   return label;
 }
 
