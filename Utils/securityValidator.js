@@ -34,7 +34,7 @@ function spawnAsync(cmd, args = [], options = {}) {
       cwd: options.cwd,
       env: options.env || process.env,
       stdio: ["ignore", "pipe", "pipe"],
-      shell: false, // CRITICAL: never use shell
+      shell: options.shell || false, // default: no shell (callers can opt-in for Windows .cmd files)
       timeout,
     });
 

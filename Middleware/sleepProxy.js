@@ -26,6 +26,9 @@
  */
 
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const mime = require("mime-types");
 const { createProxyMiddleware, responseInterceptor } = require("http-proxy-middleware");
 const IORedis = require("ioredis");
 
@@ -563,6 +566,64 @@ async function sleepProxyHandler(req, res, next) {
         ).catch(() => {});
       }
 
+      /* ── STATIC FILE SERVING (Frontend deployments) ──────────── */
+      if (docker.deploymentType === "static" && docker.staticFilesPath) {
+        const staticRoot = docker.staticFilesPath;
+
+        // Guard: static files directory must exist
+        if (!fs.existsSync(staticRoot)) {
+          console.error(`[sleepProxy] ❌ Static files missing for ${subdomain}: ${staticRoot}`);
+          return res.status(404).send(notFoundPage(subdomain));
+        }
+
+        // Resolve the requested file path (prevent path traversal)
+        const requestedPath = decodeURIComponent(req.path).replace(/\.\./g, "");
+        const filePath = path.join(staticRoot, requestedPath);
+
+        // Security: ensure resolved path is within staticRoot
+        const resolvedPath = path.resolve(filePath);
+        const resolvedRoot = path.resolve(staticRoot);
+        if (!resolvedPath.startsWith(resolvedRoot)) {
+          return res.status(403).send("Forbidden");
+        }
+
+        // Try exact file match first
+        if (fs.existsSync(resolvedPath) && fs.statSync(resolvedPath).isFile()) {
+          // Cache headers for hashed static assets (JS, CSS, images with hash in filename)
+          const isHashedAsset = /\.[a-f0-9]{8,}\.(js|css|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|eot|ico)$/i.test(resolvedPath);
+          if (isHashedAsset) {
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          } else {
+            res.setHeader("Cache-Control", "public, max-age=60");
+          }
+
+          // Set MIME type
+          const mimeType = mime.lookup(resolvedPath) || "application/octet-stream";
+          res.setHeader("Content-Type", mimeType);
+
+          return res.sendFile(resolvedPath);
+        }
+
+        // Try with .html extension (for clean URLs like /about → /about.html)
+        const htmlPath = resolvedPath + ".html";
+        if (fs.existsSync(htmlPath) && fs.statSync(htmlPath).isFile()) {
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          res.setHeader("Cache-Control", "public, max-age=60");
+          return res.sendFile(htmlPath);
+        }
+
+        // SPA fallback: serve index.html for all unmatched routes
+        const indexPath = path.join(staticRoot, "index.html");
+        if (fs.existsSync(indexPath)) {
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache");
+          return res.sendFile(indexPath);
+        }
+
+        return res.status(404).send("File not found");
+      }
+
+      /* ── DOCKER/K8s PROXY (Backend deployments) ──────────────── */
       // Clear any previous proxy-fail strikes on a successful request path
       // (we got this far, so the project is reachable from the DB)
 
@@ -593,7 +654,17 @@ async function sleepProxyHandler(req, res, next) {
     }
 
     case "sleeping": {
-      // Deduplicate wake jobs: only enqueue once per subdomain per 30s
+      // Static sites never sleep — they're just files on disk
+      if (docker.deploymentType === "static" && docker.staticFilesPath) {
+        // Auto-correct: mark as running (static files are always available)
+        docker.status = "running";
+        await docker.save();
+        console.log(`[sleepProxy] Auto-corrected static site ${subdomain} from sleeping → running`);
+        // Serve the file (redirect back to same URL — the running handler will pick it up)
+        return res.redirect(307, req.originalUrl);
+      }
+
+      // Docker deployments: deduplicate wake jobs
       const wakeKey = `wake:dedup:${project.id}`;
       const alreadyWaking = await redis.set(
         wakeKey,

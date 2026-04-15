@@ -75,6 +75,17 @@ const DockerInfo = sequelize.define(
       allowNull: true,
     },
 
+    // ── Deployment type (static = no Docker/K8s, docker = K8s pod) ──
+    deploymentType: {
+      type: DataTypes.ENUM("docker", "static"),
+      defaultValue: "docker",
+      allowNull: false,
+    },
+    staticFilesPath: {
+      type: DataTypes.STRING,
+      allowNull: true, // e.g., "/data/static-sites/my-app-42"
+    },
+
     // ── Deployment lifecycle fields ──────────────────────────────
     status: {
       type: DataTypes.ENUM("idle", "queued", "building", "running", "sleeping", "failed"),

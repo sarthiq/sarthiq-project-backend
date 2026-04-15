@@ -48,4 +48,6 @@ exports.setupModels = async () => {
   // UserPlan ↔ UserPlanMapping (1:N)
   UserPlan.hasMany(UserPlanMapping, { foreignKey: "UserPlanId" });
   UserPlanMapping.belongsTo(UserPlan, { foreignKey: "UserPlanId" });
+
+  await DockerInfo.sync({ alter: true });
 };
