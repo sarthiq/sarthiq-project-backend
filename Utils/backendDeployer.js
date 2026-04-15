@@ -239,11 +239,17 @@ async function preBuildBackend({ buildContext, detection, subdomain, envVars = {
   await log("  📦 Installing dependencies (host build)...");
   const pm = getPackageManagerCommands(buildContext);
 
+  // CRITICAL: Force NODE_ENV=development during install so devDependencies
+  // (e.g. typescript, @types/*) get installed. On production VPS, NODE_ENV=production
+  // in the system env would cause npm to skip devDeps, breaking the build.
+  const installEnv = { ...process.env, NODE_ENV: "development" };
+
   try {
     await spawnAsync(pm.installCmd, pm.installArgs, {
       timeout: 120_000,
       cwd: buildContext,
       shell: IS_WIN,
+      env: installEnv,
     });
     await log(`  → Dependencies installed (${pm.manager})`);
   } catch {
@@ -252,6 +258,7 @@ async function preBuildBackend({ buildContext, detection, subdomain, envVars = {
       timeout: 120_000,
       cwd: buildContext,
       shell: IS_WIN,
+      env: installEnv,
     });
     await log(`  → Dependencies installed (${pm.manager}, fallback)`);
   }

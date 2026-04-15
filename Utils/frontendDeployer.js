@@ -189,11 +189,15 @@ async function deployFrontend({ buildContext, detection, subdomain, envVars = {}
   await log("  📦 Installing dependencies...");
   const pm = getPackageManagerCommands(buildContext);
 
+  // Force NODE_ENV=development so devDependencies (vite, typescript, etc.) get installed
+  const installEnv = { ...process.env, NODE_ENV: "development" };
+
   try {
     await spawnAsync(pm.installCmd, pm.installArgs, {
       timeout: 120_000,
       cwd: buildContext,
       shell: IS_WIN,
+      env: installEnv,
     });
     await log(`  → Dependencies installed (${pm.manager})`);
   } catch (installErr) {
@@ -204,6 +208,7 @@ async function deployFrontend({ buildContext, detection, subdomain, envVars = {}
         timeout: 120_000,
         cwd: buildContext,
         shell: IS_WIN,
+        env: installEnv,
       });
       await log(`  → Dependencies installed (${pm.manager}, fallback mode)`);
     } catch (fallbackErr) {
