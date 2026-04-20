@@ -59,7 +59,7 @@ app.use((req, res, next) => {
 // ── CORS: support wildcard subdomains + known origins ─────────────
 const STATIC_ORIGINS = (
   process.env.ALLOWED_ORIGINS ||
-  "http://localhost:3000,http://localhost:3001,http://localhost:5173,https://devproject.sarthiq.com,https://sarthiq.com,https://project.sarthiq.com"
+  "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:5173,https://devproject.sarthiq.com,https://sarthiq.com,https://project.sarthiq.com"
 )
   .split(",")
   .map((s) => s.trim())
@@ -255,7 +255,7 @@ async function bootstrap() {
   // ── Initialize GitHub App (non-fatal if env not set) ────────────
   initGithubApp();
 
-  setupModels();
+  await setupModels();
 
   // ── Reconcile DB ↔ K8s state (fixes ghost 'running' records after restart) ──
   const { reconcileOnStartup } = require("./Jobs/reconciler");

@@ -50,4 +50,6 @@ exports.setupModels = async () => {
   UserPlanMapping.belongsTo(UserPlan, { foreignKey: "UserPlanId" });
 
   await DockerInfo.sync({ alter: true });
+  // const db = require("../database");
+  // await db.sync({ alter: true });
 };
